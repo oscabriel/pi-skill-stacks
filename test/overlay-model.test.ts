@@ -3,10 +3,18 @@ import { test } from "node:test";
 import { StacksOverlayModel } from "../src/overlay-model.ts";
 import { skillsOnDisk } from "./helpers.ts";
 
+const defaultContents = new Map([
+  ["alpha", "alpha line one\n\nalpha line two"],
+  ["beta", "beta body"],
+  ["gamma", "gamma body"],
+  ["delta", "delta body"],
+]);
+
 function makeModel(overrides?: {
   stacks?: Record<string, string[]>;
   disabledStacks?: string[];
   projectStackNames?: string[];
+  skillContents?: ReadonlyMap<string, string>;
 }) {
   const discovered = skillsOnDisk("alpha", "beta", "gamma", "delta");
   return new StacksOverlayModel({
@@ -14,6 +22,7 @@ function makeModel(overrides?: {
     disabledStacks: overrides?.disabledStacks ?? [],
     discovered,
     projectStackNames: new Set(overrides?.projectStackNames ?? []),
+    skillContents: overrides?.skillContents ?? defaultContents,
   });
 }
 
@@ -169,6 +178,87 @@ test("moveMember scrolls within each section based on the given rows", () => {
   model.moveMember(1, 2);
   assert.equal(model.memberIndex, 2);
   assert.equal(model.memberWindow(2).start, 1);
+});
+
+test("openViewer shows the selected member's markdown in the viewer pane", () => {
+  const model = makeModel();
+  model.setFocus("members");
+  assert.equal(model.openViewer(), true);
+  assert.equal(model.focus, "viewer");
+  assert.equal(model.viewerOpen, true);
+  const win = model.viewerWindow(20, 10);
+  assert.deepEqual(win.items.slice(0, 3), ["alpha line one", "", "alpha line two"]);
+  assert.equal(win.start, 0);
+});
+
+test("openViewer wraps long lines to the pane width", () => {
+  const body = "first\n" + "word ".repeat(10) + "end";
+  const model = makeModel({
+    stacks: { one: ["alpha"] },
+    skillContents: new Map([["alpha", body]]),
+  });
+  model.setFocus("members");
+  model.openViewer();
+  const lines = model.viewerWindow(12, 100).items;
+  assert.equal(lines[0], "first");
+  for (const line of lines) assert.ok(line.length <= 12, `line too wide: ${line}`);
+  assert.equal(lines.join(" "), body.replace("\n", " "));
+});
+
+test("openViewer is refused for missing skills and empty stacks", () => {
+  const ghost = makeModel({ stacks: { one: ["ghost"] } });
+  ghost.setFocus("members");
+  assert.equal(ghost.openViewer(), false);
+  assert.equal(ghost.focus, "members");
+
+  const empty = makeModel({ stacks: { one: [] } });
+  empty.setFocus("members");
+  assert.equal(empty.openViewer(), false);
+});
+
+test("openViewer for a discovered skill with no readable content shows an empty viewer", () => {
+  const model = makeModel({ stacks: { one: ["alpha"] }, skillContents: new Map() });
+  model.setFocus("members");
+  assert.equal(model.openViewer(), true);
+  assert.deepEqual(model.viewerWindow(20, 10).items, []);
+});
+
+test("moveViewer scrolls the viewport and clamps at both ends", () => {
+  const body = Array.from({ length: 30 }, (_, i) => `row ${i}`).join("\n");
+  const model = makeModel({ stacks: { one: ["alpha"] }, skillContents: new Map([["alpha", body]]) });
+  model.setFocus("members");
+  model.openViewer();
+  model.moveViewer(5, 20, 10);
+  assert.equal(model.viewerWindow(20, 10).start, 5);
+  assert.equal(model.viewerWindow(20, 10).items[0], "row 5");
+  model.moveViewer(-100, 20, 10);
+  assert.equal(model.viewerWindow(20, 10).start, 0);
+  model.moveViewer(100, 20, 10);
+  assert.equal(model.viewerWindow(20, 10).start, 20, "last page starts at total - rows");
+  assert.equal(model.viewerWindow(20, 10).items.at(-1), "row 29");
+});
+
+test("closeViewer returns focus to members and reopening resets the scroll", () => {
+  const body = Array.from({ length: 30 }, (_, i) => `row ${i}`).join("\n");
+  const model = makeModel({ stacks: { one: ["alpha"] }, skillContents: new Map([["alpha", body]]) });
+  model.setFocus("members");
+  model.openViewer();
+  model.moveViewer(7, 20, 10);
+  model.closeViewer();
+  assert.equal(model.focus, "members");
+  assert.equal(model.viewerOpen, false);
+  model.openViewer();
+  assert.equal(model.viewerWindow(20, 10).start, 0);
+});
+
+test("the viewer re-wraps when the pane width changes", () => {
+  const model = makeModel({ stacks: { one: ["alpha"] } });
+  model.setFocus("members");
+  model.openViewer();
+  const wide = model.viewerWindow(40, 100).items;
+  const narrow = model.viewerWindow(10, 100).items;
+  assert.equal(wide.length, 3);
+  assert.ok(narrow.length > 3);
 });
 
 test("windows clamp when the list is shorter than the viewport", () => {

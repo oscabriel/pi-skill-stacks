@@ -7,15 +7,20 @@
 // stacks are visible and toggleable but their membership is read-only; edits
 // to them would be shadowed by the project config on the next merge.
 
+import { renderMarkdown, type MarkdownStyler } from "./markdown.ts";
 import { computeExcludedSkills, sortNames, type DiscoveredSkills, type StackMap } from "./core.ts";
 
-export type OverlayFocus = "stacks" | "members";
+export type OverlayFocus = "stacks" | "members" | "viewer";
 
 export interface StacksOverlayInit {
   stacks: StackMap;
   disabledStacks: string[];
   discovered: DiscoveredSkills;
   projectStackNames?: ReadonlySet<string>;
+  /** Skill name → full SKILL.md text (frontmatter included); powers the viewer pane. */
+  skillContents?: ReadonlyMap<string, string>;
+  /** How viewer text is styled; defaults to plain. */
+  styler?: MarkdownStyler;
 }
 
 export interface StackRow {
@@ -59,17 +64,23 @@ export class StacksOverlayModel {
   private stackOffset = 0;
   memberIndex = 0;
   private memberOffset = 0;
+  private viewerOffset = 0;
 
   private readonly discovered: DiscoveredSkills;
   private readonly projectStackNames: ReadonlySet<string>;
+  private readonly skillContents: ReadonlyMap<string, string>;
+  private readonly styler: MarkdownStyler;
   private stackMap: StackMap;
   private names: string[];
   private disabled: Set<string>;
   private excluded: Set<string>;
+  private viewerCache: { width: number; skill: string; lines: string[] } | undefined;
 
   constructor(init: StacksOverlayInit) {
     this.discovered = init.discovered;
     this.projectStackNames = init.projectStackNames ?? new Set();
+    this.skillContents = init.skillContents ?? new Map();
+    this.styler = init.styler ?? { fg: (_color, text) => text, bold: (text) => text };
     this.stackMap = copyStacks(init.stacks);
     this.names = sortNames(Object.keys(this.stackMap));
     this.disabled = new Set(init.disabledStacks.filter((name) => this.names.includes(name)));
@@ -180,6 +191,56 @@ export class StacksOverlayModel {
         active: this.isActiveSkill(name),
       })),
     };
+  }
+
+  /** The member under the cursor, or undefined for an empty pane. */
+  get selectedMember(): string | undefined {
+    return this.selectedMembers[this.memberIndex];
+  }
+
+  /** True while the viewer pane is open (it is visible exactly when focused). */
+  get viewerOpen() {
+    return this.focus === "viewer";
+  }
+
+  /** Open the viewer on the selected member. False when nothing viewable is selected. */
+  openViewer(): boolean {
+    const skill = this.selectedMember;
+    if (!skill || !this.discovered.has(skill)) return false;
+    this.focus = "viewer";
+    this.viewerOffset = 0;
+    return true;
+  }
+
+  closeViewer() {
+    this.focus = "members";
+  }
+
+  /** The selected member's SKILL.md, rendered to styled lines at `width` columns (cached). */
+  viewerLines(width: number): string[] {
+    const w = Math.max(1, Math.floor(width));
+    const skill = this.selectedMember ?? "";
+    if (!this.viewerCache || this.viewerCache.width !== w || this.viewerCache.skill !== skill) {
+      this.viewerCache = {
+        width: w,
+        skill,
+        lines: renderMarkdown(this.skillContents.get(skill) ?? "", w, this.styler),
+      };
+    }
+    return this.viewerCache.lines;
+  }
+
+  moveViewer(delta: number, width: number, rows: number) {
+    const total = this.viewerLines(width).length;
+    const maxStart = Math.max(0, total - Math.max(1, rows));
+    this.viewerOffset = clamp(this.viewerOffset + delta, 0, maxStart);
+  }
+
+  viewerWindow(width: number, rows: number): Window<string> {
+    const visible = Math.max(1, rows);
+    const lines = this.viewerLines(width);
+    const start = clamp(this.viewerOffset, 0, Math.max(0, lines.length - visible));
+    return { start, items: lines.slice(start, start + visible) };
   }
 
   // ---- mutations (each leaves the model consistent; caller persists) ----

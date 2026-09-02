@@ -9,6 +9,7 @@ import {
   loadProjectStacks,
   loadStacksConfig,
   readSettingsSkills,
+  readSkillContents,
   saveStacksConfig,
   updateSettingsSkills,
 } from "../src/store.ts";
@@ -43,6 +44,22 @@ test("discoverSkills: maps names to baseDir-relative SKILL.md paths across roots
       ["beta", "skills/beta/SKILL.md"],
     ],
   );
+});
+
+test("readSkillContents: resolves through roots in order and keeps frontmatter", () => {
+  const base = join(tmp, "contents");
+  const root2 = join(tmp, "contents2");
+  skillDir(base, "skills", "alpha");
+  writeFileSync(join(base, "skills", "alpha", "SKILL.md"), "---\nname: alpha\ndescription: x\n---\n# Body\n\ntext");
+  skillDir(root2, "skills", "beta");
+
+  const roots = [
+    { dir: join(base, "skills"), baseDir: base },
+    { dir: join(root2, "skills"), baseDir: root2 },
+  ];
+  const contents = readSkillContents(discoverSkills(roots), roots);
+  assert.equal(contents.get("alpha"), "---\nname: alpha\ndescription: x\n---\n# Body\n\ntext");
+  assert.equal(contents.get("beta"), "---\ndescription: x\n---\n# skill");
 });
 
 test("discoverSkills: recurses like pi (nested skills, frontmatter names, skips dot-dirs/node_modules)", () => {

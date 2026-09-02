@@ -34,7 +34,11 @@ const sampleStacks = {
 
 function makeOverlay(
   rows: number,
-  overrides?: { stacks?: Record<string, string[]>; settingsChanged?: boolean },
+  overrides?: {
+    stacks?: Record<string, string[]>;
+    settingsChanged?: boolean;
+    skillContents?: ReadonlyMap<string, string>;
+  },
 ) {
   const results: OverlayResult[] = [];
   const overlay = new StacksOverlay(
@@ -45,6 +49,7 @@ function makeOverlay(
       disabledStacks: ["remotion"],
       discovered: skillsOnDisk("skill-0", "firecrawl-scrape", "alpha", "beta"),
       projectStackNames: new Set(["remotion"]),
+      skillContents: overrides?.skillContents,
     },
     {
       persist: () => outcome(overrides?.settingsChanged ?? false),
@@ -80,6 +85,134 @@ test("render: every line is exactly the width, across sizes, panes, focus, and e
       assertFramesFit(empty, width, `no stacks rows=${rows}`);
     }
   }
+});
+
+const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+
+test("render: viewer pane opens to the right of members and every line still fits", () => {
+  const contents = new Map([["alpha", "viewer heading\n\nviewer body marker"]]);
+  for (const width of [40, 50, 76, 100, 160, 300]) {
+    const { overlay } = makeOverlay(24, { skillContents: contents });
+    overlay.handleInput("\t"); // members focus
+    overlay.handleInput("\r"); // enter → viewer for skill-0
+    assertFramesFit(overlay, width, `viewer width=${width}`);
+
+    const lines = overlay.render(width).map(stripAnsi);
+    // three panes: two inner separators per body row, plus the header row
+    const bodyRows = lines.filter((line) => line.startsWith("│"));
+    for (const row of bodyRows) {
+      assert.equal(row.split("│").length - 1, 4, `expected four bars (three panes): ${row}`);
+    }
+    assert.match(lines.join("\n"), /heading/);
+    assert.match(lines.join("\n"), /marker/);
+    assert.match(lines.join("\n"), /\[↑↓\] scroll · \[esc\] back/);
+  }
+});
+
+test("render: closing the viewer restores the two-pane layout", () => {
+  const { overlay } = makeOverlay(24);
+  overlay.handleInput("\t");
+  overlay.handleInput("\r");
+  overlay.handleInput("\r"); // enter again in the viewer closes it
+  const lines = overlay.render(100).map(stripAnsi);
+  const bodyRows = lines.filter((line) => line.startsWith("│"));
+  for (const row of bodyRows) assert.equal(row.split("│").length - 1, 3, row);
+  assert.doesNotMatch(lines.join("\n"), /scroll/);
+});
+
+test("handleInput: enter on a missing skill notifies instead of opening the viewer", () => {
+  const notices: string[] = [];
+  const overlay = new StacksOverlay(
+    { terminal: { rows: 24 }, requestRender: () => {} },
+    fakeTheme,
+    {
+      stacks: { firecrawl: ["ghost-skill"] },
+      disabledStacks: [],
+      discovered: skillsOnDisk("firecrawl-scrape"),
+      projectStackNames: new Set(),
+      skillContents: new Map(),
+    },
+    {
+      persist: () => outcome(false),
+      notify: (message) => notices.push(message),
+      input: async () => undefined,
+      confirm: async () => false,
+      pick: async () => undefined,
+      done: () => {},
+    },
+  );
+  overlay.handleInput("\t");
+  overlay.handleInput("\r");
+  assert.match(notices.at(-1)!, /ghost-skill/);
+  const lines = overlay.render(100).map(stripAnsi);
+  const bodyRows = lines.filter((line) => line.startsWith("│"));
+  for (const row of bodyRows) assert.equal(row.split("│").length - 1, 3, row);
+});
+
+test("handleInput: j/k scroll the viewer content", () => {
+  const body = Array.from({ length: 60 }, (_, i) => `row ${i}`).join("\n");
+  const { overlay } = makeOverlay(24, {
+    stacks: { one: ["alpha"] },
+    skillContents: new Map([["alpha", body]]),
+  });
+  overlay.handleInput("\t");
+  overlay.handleInput("\r");
+  let joined = overlay.render(100).map(stripAnsi).join("\n");
+  assert.match(joined, /row 0/);
+  overlay.handleInput("j");
+  joined = overlay.render(100).map(stripAnsi).join("\n");
+  assert.doesNotMatch(joined, /row 0/);
+  assert.match(joined, /row 1/);
+  overlay.handleInput("k");
+  joined = overlay.render(100).map(stripAnsi).join("\n");
+  assert.match(joined, /row 0/);
+});
+
+test("handleInput: esc in the viewer returns to members", () => {
+  const { overlay } = makeOverlay(24, { skillContents: new Map([["skill-0", "text"]]) });
+  overlay.handleInput("\t");
+  overlay.handleInput("\r");
+  overlay.handleInput("\x1b");
+  assert.doesNotMatch(overlay.render(100).join("\n"), /scroll/);
+});
+
+test("handleInput: →/tab in members opens the viewer, ← returns to stacks", () => {
+  const { overlay } = makeOverlay(24, { skillContents: new Map([["skill-0", "text"]]) });
+  overlay.handleInput("\t"); // members focus
+  overlay.handleInput("\t"); // tab → viewer (forward)
+  assert.match(overlay.render(100).map(stripAnsi).join("\n"), /\[↑↓\] scroll/);
+  overlay.handleInput("\x1b[D"); // left arrow → back to members
+  assert.match(overlay.render(100).map(stripAnsi).join("\n"), /\[↑↓\] move/);
+  // the viewer closed, so right arrow is members-forward again: back into the viewer
+  overlay.handleInput("\x1b[C");
+  assert.match(overlay.render(100).map(stripAnsi).join("\n"), /\[↑↓\] scroll/);
+  overlay.handleInput("\x1b"); // esc → members
+  overlay.handleInput("\x1b[D"); // left → stacks
+  assert.match(overlay.render(100).map(stripAnsi).join("\n"), /\[↑↓\] select/);
+});
+
+test("handleInput: →/tab in the viewer are no-ops (viewer is the last pane)", () => {
+  const { overlay } = makeOverlay(24, { skillContents: new Map([["skill-0", "text"]]) });
+  overlay.handleInput("\t");
+  overlay.handleInput("\r");
+  overlay.handleInput("\t");
+  assert.match(overlay.render(100).map(stripAnsi).join("\n"), /\[↑↓\] scroll/);
+  overlay.handleInput("\x1b[C");
+  assert.match(overlay.render(100).map(stripAnsi).join("\n"), /\[↑↓\] scroll/);
+});
+
+test("render: title is compact and the help bar brackets the keys", () => {
+  const { overlay } = makeOverlay(24);
+  const lines = overlay.render(100).map(stripAnsi);
+  assert.match(lines[0]!, /skill stacks \(4\) · \d+\/\d+ active/);
+  // full help bar needs width; frameEdge truncates it on narrow terminals
+  const help = overlay.render(160).map(stripAnsi).at(-1)!;
+  assert.match(help, /\[space\] on\/off · \[→\/tab\] members/);
+  assert.match(help, /\[esc\] close/);
+  overlay.handleInput("\t");
+  const membersHelp = overlay.render(160).map(stripAnsi).at(-1)!;
+  assert.match(membersHelp, /\[enter\] view/);
+  assert.match(membersHelp, /\[←\/esc\] back/);
 });
 
 test("render: every row count matches the requested body height", () => {

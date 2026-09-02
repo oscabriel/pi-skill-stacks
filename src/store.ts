@@ -201,6 +201,30 @@ export function discoverSkills(roots: SkillRoot[] = defaultSkillRoots()): Discov
   return skills;
 }
 
+/**
+ * Full SKILL.md text per discovered skill, for the overlay's viewer pane.
+ * Roots are tried in discovery order, so a name clash resolves the same way
+ * discovery did. Unreadable skills map to "".
+ */
+export function readSkillContents(
+  discovered: DiscoveredSkills,
+  roots: SkillRoot[] = defaultSkillRoots(),
+): Map<string, string> {
+  const contents = new Map<string, string>();
+  const done = new Set<string>();
+  for (const root of roots) {
+    for (const [name, relativePath] of discovered) {
+      if (done.has(name)) continue;
+      const full = join(root.baseDir, relativePath);
+      if (isFile(full)) {
+        contents.set(name, readFileSync(full, "utf-8"));
+        done.add(name);
+      }
+    }
+  }
+  return contents;
+}
+
 export function readSettingsSkills(path = globalSettingsPath()) {
   const record = readJsonObject(path);
   const skills = record?.skills;

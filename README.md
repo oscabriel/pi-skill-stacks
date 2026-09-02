@@ -4,7 +4,7 @@ A [pi](https://github.com/earendil-works/pi-mono) package that groups your skill
 
 ## What it does
 
-- `/stacks` opens a two-pane overlay. Left: stacks with on/off state, create (`n`), delete (`d`), and `a` to add skills that aren't in any stack yet. Right: the selected stack's members; `space` removes one. So you can build and edit stacks without touching JSON. Changes persist as you make them; pi reloads once when you close the overlay, and only if a toggle actually changed `settings.json`.
+- `/stacks` opens a two-pane overlay. Left: stacks with on/off state, create (`n`), delete (`d`), and `a` to add skills that aren't in any stack yet. Right: the selected stack's members; `space` removes one, `enter` opens the skill's full markdown in a viewer pane. So you can build and edit stacks without touching JSON. Changes persist as you make them; pi reloads once when you close the overlay, and only if a toggle actually changed `settings.json`.
 - `/stacks on <stack>` / `/stacks off <stack>` toggle a single stack (with argument completion); `/stacks list` prints state without changing anything. Bare `/stacks` outside the TUI (RPC/print mode) prints the list too.
 - Toggling off writes `!skills/<dir>/SKILL.md` exclusion patterns into the global settings `skills` array — pi's own override mechanism — so disabled skills are excluded everywhere, not just from the prompt. The extension only ever removes patterns it wrote itself (tracked in `managedExclusions`); hand-written `pi config` entries are left alone.
 - The bundled header extension replaces pi's startup `[Skills]` listing with a compact line like `matt-pocock (28), firecrawl (28) · 76/76 skills active` (with `off: <name> (n)` segments for disabled stacks) and hides the `[Themes]` section.
@@ -48,14 +48,19 @@ The config file is validated on every load. A malformed entry (a stack that isn'
 
 ## Overlay keys
 
+Navigation is consistent across panes: `←`/`esc` always goes back a pane, `→`/`tab` (or `enter` on a member) always goes forward. `←` in the leftmost pane and `→` in the viewer do nothing.
+
 | Pane | Keys |
 | --- | --- |
 | stacks | `↑`/`↓` (or `k`/`j`) select · `space` on/off · `→`/`l`/`tab`/`enter` into members · `a` add skills · `n` new stack · `d` delete · `esc`/`q` close |
-| members | `↑`/`↓` (or `k`/`j`) move · `space` remove the skill · `a` add skills · `←`/`h`/`tab`/`esc` back to stacks |
+| members | `↑`/`↓` (or `k`/`j`) move · `space` remove the skill · `enter`/`→`/`tab` view skill · `a` add skills · `←`/`h`/`esc` back to stacks |
+| skill viewer | `↑`/`↓` (or `k`/`j`) scroll · `enter`/`←`/`h`/`esc` back to members |
 | add skills dialog | `↑`/`↓` move · `space` mark · `enter` add the marked skills (or the highlighted one) · `esc` cancel |
 | new stack / delete dialogs | `enter` confirm · `esc` cancel |
 
 The `a`, `n` and `d` dialogs open as small overlays on top of `/stacks`. `a` lists only skills that no stack holds yet. To move a skill between stacks, `space` it out of one and `a` it into the other.
+
+`enter` in the members pane opens the skill's full markdown in a viewer pane inside the overlay: frontmatter dim, headings bold, bullets and indented code rendered, links shown as their text.
 
 The title bar shows `reload pending` once a change has touched `settings.json`; the reload runs when you close the overlay.
 

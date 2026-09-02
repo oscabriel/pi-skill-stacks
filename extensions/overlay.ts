@@ -1,6 +1,7 @@
 // Two-pane overlay for /stacks: stacks on the left (on/off, create, delete,
 // `a` to add unstacked skills), the selected stack's members on the right
-// (space removes one). Every mutation is persisted immediately
+// (space removes one, enter opens a skill viewer as a third pane inside the
+// overlay). Every mutation is persisted immediately
 // through the caller's callback; the ctx.reload() that makes pi pick the
 // changes up happens once, after the overlay closes, and only if settings.json
 // actually changed (re-stacking alone doesn't need one).
@@ -80,6 +81,8 @@ export class StacksOverlay {
   private settingsDirty = false;
   private lastOutcome: ApplyOutcome | null = null;
   private dialogOpen = false;
+  /** Width of the last render; handleInput uses it for the viewer's wrap width. */
+  private lastWidth = 80;
 
   constructor(
     tui: OverlayTui,
@@ -90,7 +93,7 @@ export class StacksOverlay {
     this.tui = tui;
     this.theme = theme;
     this.callbacks = callbacks;
-    this.model = new StacksOverlayModel(init);
+    this.model = new StacksOverlayModel({ ...init, styler: theme });
   }
 
   invalidate() {}
@@ -98,6 +101,7 @@ export class StacksOverlay {
   handleInput(data: string) {
     if (this.dialogOpen) return; // a dialog owns the keyboard until its promise settles
     if (this.model.focus === "stacks") this.handleStacksInput(data);
+    else if (this.model.focus === "viewer") this.handleViewerInput(data);
     else this.handleMembersInput(data);
   }
 
@@ -135,20 +139,34 @@ export class StacksOverlay {
   }
 
   private handleMembersInput(data: string) {
-    if (
-      matchesKey(data, Key.escape) ||
-      matchesKey(data, Key.left) ||
-      matchesKey(data, Key.tab) ||
-      data === "h"
-    ) {
+    // consistent pane navigation: ←/esc always back, →/tab always forward
+    if (matchesKey(data, Key.escape) || matchesKey(data, Key.left) || data === "h") {
       this.model.setFocus("stacks");
       this.tui.requestRender();
+    } else if (
+      matchesKey(data, Key.enter) ||
+      matchesKey(data, Key.right) ||
+      matchesKey(data, Key.tab)
+    ) {
+      // enter opens the skill viewer pane to the right (focus moves with it)
+      if (this.model.openViewer()) {
+        this.tui.requestRender();
+      } else if (this.model.selectedMember) {
+        this.callbacks.notify(`"${this.model.selectedMember}" is not on disk`, "warning");
+      }
     } else if (matchesKey(data, Key.down) || data === "j") {
       this.model.moveMember(1, this.memberRows());
       this.tui.requestRender();
     } else if (matchesKey(data, Key.up) || data === "k") {
       this.model.moveMember(-1, this.memberRows());
       this.tui.requestRender();
+    } else if (matchesKey(data, Key.enter)) {
+      // enter opens the skill viewer pane to the right (focus moves with it)
+      if (this.model.openViewer()) {
+        this.tui.requestRender();
+      } else if (this.model.selectedMember) {
+        this.callbacks.notify(`"${this.model.selectedMember}" is not on disk`, "warning");
+      }
     } else if (data === "a") {
       this.openAddDialog();
     } else if (data === " ") {
@@ -161,19 +179,42 @@ export class StacksOverlay {
     }
   }
 
+  private handleViewerInput(data: string) {
+    // ←/esc (and enter) return to members; →/tab are no-ops, the viewer is the last pane
+    if (
+      matchesKey(data, Key.escape) ||
+      matchesKey(data, Key.enter) ||
+      matchesKey(data, Key.left) ||
+      data === "h"
+    ) {
+      this.model.closeViewer();
+      this.tui.requestRender();
+    } else if (matchesKey(data, Key.down) || data === "j") {
+      this.model.moveViewer(1, this.viewerTextWidth(), this.viewerRows());
+      this.tui.requestRender();
+    } else if (matchesKey(data, Key.up) || data === "k") {
+      this.model.moveViewer(-1, this.viewerTextWidth(), this.viewerRows());
+      this.tui.requestRender();
+    }
+  }
+
   render(width: number) {
+    this.lastWidth = width;
     const rows = this.bodyRows();
-    const { leftW, rightW } = this.paneWidths(width);
+    const { leftW, membersW, viewerW } = this.paneWidths(width);
     const stack = this.model.selectedStack;
 
     const dirty = this.settingsDirty ? this.theme.fg("warning", " · reload pending") : "";
-    const title = `skill stacks · ${this.model.stackCount} ${
-      this.model.stackCount === 1 ? "stack" : "stacks"
-    } · ${this.model.activeSkillCount}/${this.model.discoveredCount} skills active${dirty}`;
+    const title = `skill stacks (${this.model.stackCount}) · ${
+      this.model.activeSkillCount
+    }/${this.model.discoveredCount} active${dirty}`;
     const lines = [this.border(width, title, true)];
 
     const stackWin = this.model.stackWindow(rows);
     const memberWin = this.model.memberWindow(this.memberRows());
+    const viewerWin = this.model.viewerOpen
+      ? this.model.viewerWindow(Math.max(1, viewerW - 2), this.viewerRows())
+      : undefined;
     const blank = (w: number) => " ".repeat(w);
     const hint = (text: string, w: number) => padToWidth(this.theme.fg("dim", text), w);
 
@@ -183,32 +224,65 @@ export class StacksOverlay {
         ? this.renderStackCell(stackEntry, stackWin.start + row, leftW)
         : blank(leftW);
 
-      let right: string;
+      let members: string;
       if (!stack) {
-        right = row === 0 ? hint(" no stacks · n creates one", rightW) : blank(rightW);
+        members = row === 0 ? hint(" no stacks · n creates one", membersW) : blank(membersW);
       } else if (row === 0) {
-        right = this.renderStackHeader(stack, rightW);
+        members = this.renderStackHeader(stack, membersW);
       } else if (row === 1) {
-        right = hint(" members", rightW);
+        members = hint(" members", membersW);
       } else {
         const index = row - 2;
         const entry = memberWin.items[index];
-        right = entry
-          ? this.renderMemberCell(entry, memberWin.start + index, rightW)
+        members = entry
+          ? this.renderMemberCell(entry, memberWin.start + index, membersW)
           : index === 0
-            ? hint(" (none · a adds skills)", rightW)
-            : blank(rightW);
+            ? hint(" (none · a adds skills)", membersW)
+            : blank(membersW);
+      }
+
+      let viewer = blank(viewerW);
+      if (viewerWin) {
+        if (row === 0) {
+          viewer = this.renderViewerHeader(viewerW);
+        } else if (viewerWin.items.length === 0 && row === 1) {
+          viewer = hint(" (no content)", viewerW);
+        } else {
+          const entry = viewerWin.items[row - 1];
+          if (entry !== undefined) viewer = padToWidth(this.theme.fg("text", ` ${entry}`), viewerW);
+        }
       }
 
       const mid = this.theme.fg(this.model.focus === "members" ? "borderAccent" : "borderMuted", "│");
+      const viewerSep = viewerWin
+        ? this.theme.fg(this.model.focus === "viewer" ? "borderAccent" : "borderMuted", "│")
+        : "";
       const edge = this.theme.fg("borderAccent", "│");
-      lines.push(`${edge}${left}${mid}${right}${edge}`);
+      lines.push(`${edge}${left}${mid}${members}${viewerSep}${viewer}${edge}`);
     }
 
-    const help =
-      this.model.focus === "stacks"
-        ? "↑↓ select · space on/off · →/tab members · a add skills · n new stack · d delete · esc close"
-        : "↑↓ move · space remove · a add skills · ←/tab back";
+    const help = this.model.viewerOpen
+      ? this.hintBar([
+          ["↑↓", "scroll"],
+          ["esc", "back"],
+        ])
+      : this.model.focus === "stacks"
+        ? this.hintBar([
+            ["↑↓", "select"],
+            ["space", "on/off"],
+            ["→/tab", "members"],
+            ["a", "add skills"],
+            ["n", "new stack"],
+            ["d", "delete"],
+            ["esc", "close"],
+          ])
+        : this.hintBar([
+            ["↑↓", "move"],
+            ["space", "remove"],
+            ["enter", "view"],
+            ["a", "add skills"],
+            ["←/esc", "back"],
+          ]);
     lines.push(this.border(width, help, false));
     return lines;
   }
@@ -294,13 +368,37 @@ export class StacksOverlay {
     return Math.max(1, this.bodyRows() - 2);
   }
 
+  /** Viewer pane: 1 skill-name header row, then the wrapped markdown. */
+  private viewerRows() {
+    return Math.max(1, this.bodyRows() - 1);
+  }
+
+  private viewerTextWidth() {
+    return Math.max(1, this.paneWidths(this.lastWidth).viewerW - 2);
+  }
+
   private paneWidths(width: number) {
     const leftW = Math.min(30, Math.max(18, Math.floor(width * 0.3)));
-    return { leftW, rightW: Math.max(1, width - leftW - 3) };
+    if (!this.model.viewerOpen) {
+      return { leftW, membersW: Math.max(1, width - leftW - 3), viewerW: 0 };
+    }
+    // edge + left + │ + members + │ + viewer + edge = width (four vertical bars)
+    const remaining = Math.max(0, width - leftW - 4);
+    const viewerW = Math.max(10, Math.floor(remaining * 0.6));
+    const membersW = Math.max(1, remaining - viewerW);
+    return { leftW, membersW, viewerW };
   }
 
   private border(width: number, label: string, top: boolean) {
     return frameEdge(this.theme, width, label, top);
+  }
+
+  /** ` [↑↓] select · [space] on/off`: bracketed keys in plain text, labels dim. */
+  private hintBar(parts: Array<readonly [string, string]>) {
+    const sep = this.theme.fg("dim", " · ");
+    return parts
+      .map(([key, label]) => `${this.theme.fg("text", `[${key}]`)} ${this.theme.fg("dim", label)}`)
+      .join(sep);
   }
 
   private renderStackHeader(stack: string, width: number) {
@@ -347,6 +445,11 @@ export class StacksOverlay {
     const tone = entry.missing ? "warning" : entry.active ? "text" : "muted";
     const row = padToWidth(`${focused ? CURSOR : NO_CURSOR}[x] ${this.theme.fg(tone, shown)}${suffix}`, width);
     return selected ? this.selectedBg(row, "members") : row;
+  }
+
+  private renderViewerHeader(viewerW: number) {
+    const name = this.model.selectedMember ?? "";
+    return padToWidth(this.theme.fg("accent", this.theme.bold(` ${name}`)), viewerW);
   }
 
 }

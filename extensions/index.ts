@@ -42,6 +42,7 @@ import {
   loadProjectStacks,
   loadStacksConfig,
   readSettingsSkills,
+  readSkillContents,
   saveStacksConfig,
   updateSettingsSkills,
 } from "../src/store.ts";
@@ -155,6 +156,7 @@ async function runStacksCommand(args: string, ctx: ExtensionCommandContext) {
         disabledStacks: view.disabledStacks,
         discovered: view.discovered,
         projectStackNames: view.projectStackNames,
+        skillContents: readSkillContents(view.discovered),
       },
       (stacks, disabledStacks) => persistStacksState(view, stacks, disabledStacks),
     );
