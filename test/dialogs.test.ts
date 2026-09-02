@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { ConfirmDialog, PromptDialog } from "../extensions/dialogs.ts";
+import { ConfirmDialog, PickDialog, PromptDialog } from "../extensions/dialogs.ts";
 
 const fakeTheme = {
   fg: (_color: string, text: string) => `\x1b[38;5;4m${text}\x1b[0m`,
@@ -59,6 +59,60 @@ test("PromptDialog: focus propagates to the inner Input", () => {
   prompt.focused = false;
   const unfocusedRender = prompt.render(60).join("");
   assert.notEqual(focusedRender, unfocusedRender);
+});
+
+const items = Array.from({ length: 30 }, (_, i) => `skill-${String(i).padStart(2, "0")}`);
+
+test("PickDialog renders every line at exactly the requested width, at any list length", () => {
+  for (const width of [8, 20, 44, 60, 120]) {
+    for (const count of [1, 5, 30]) {
+      const pick = new PickDialog(fakeTheme, "Add to writing", items.slice(0, count), () => {});
+      assertExactWidth(pick.render(width), width, `pick n=${count}`);
+      pick.handleInput(" ");
+      pick.handleInput("j");
+      assertExactWidth(pick.render(width), width, `pick marked n=${count}`);
+    }
+  }
+});
+
+test("PickDialog: caps visible rows and scrolls the cursor into view", () => {
+  const pick = new PickDialog(fakeTheme, "Add", items, () => {});
+  const first = pick.render(60).map(stripAnsi);
+  assert.equal(first.length, PickDialog.MAX_ROWS + 2, "list rows plus two frame edges");
+  assert.match(first.join("\n"), /› \[ \] skill-00/);
+  for (let i = 0; i < 20; i += 1) pick.handleInput("j");
+  const later = pick.render(60).map(stripAnsi).join("\n");
+  assert.match(later, /› \[ \] skill-20/);
+  assert.doesNotMatch(later, /skill-00/);
+});
+
+test("PickDialog: enter with nothing marked adds the highlighted skill", () => {
+  const results: (string[] | undefined)[] = [];
+  const pick = new PickDialog(fakeTheme, "Add", items.slice(0, 5), (v) => results.push(v));
+  pick.handleInput("j");
+  pick.handleInput("j");
+  pick.handleInput("\r");
+  assert.deepEqual(results, [["skill-02"]]);
+});
+
+test("PickDialog: space marks and unmarks, enter adds the marked set, esc cancels", () => {
+  const results: (string[] | undefined)[] = [];
+  const pick = new PickDialog(fakeTheme, "Add", items.slice(0, 5), (v) => results.push(v));
+  pick.handleInput(" "); // mark 00
+  pick.handleInput("j");
+  pick.handleInput(" "); // mark 01
+  pick.handleInput(" "); // unmark 01
+  pick.handleInput("j");
+  pick.handleInput(" "); // mark 02
+  assert.match(pick.render(60).map(stripAnsi).join("\n"), /2 marked/);
+  pick.handleInput("\r");
+  assert.deepEqual(results, [["skill-00", "skill-02"]]);
+
+  const cancelResults: (string[] | undefined)[] = [];
+  const cancelled = new PickDialog(fakeTheme, "Add", items.slice(0, 5), (v) => cancelResults.push(v));
+  cancelled.handleInput(" ");
+  cancelled.handleInput("\x1b");
+  assert.deepEqual(cancelResults, [undefined]);
 });
 
 test("ConfirmDialog: enter confirms, esc cancels, other keys ignored", () => {

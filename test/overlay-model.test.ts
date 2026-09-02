@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { splitSectionRows, StacksOverlayModel } from "../src/overlay-model.ts";
+import { StacksOverlayModel } from "../src/overlay-model.ts";
 import { skillsOnDisk } from "./helpers.ts";
 
 function makeModel(overrides?: {
@@ -44,49 +44,46 @@ test("toggleStack: overlap rule keeps a skill active while any enabled stack has
   assert.ok(!model.isActiveSkill("alpha"));
 });
 
-test("toggleMembership adds an available skill to the selected stack", () => {
-  const model = makeModel();
-  // members of "one": alpha, beta; available: delta, gamma (sorted)
-  model.setFocus("members");
-  model.moveMember(3, 10, 10); // flat: alpha, beta, delta, gamma → onto gamma
-  assert.equal(model.toggleMembership(), "added");
-  assert.deepEqual(model.membersOf("one"), ["alpha", "beta", "gamma"]);
-  assert.deepEqual(model.availableFor("one"), ["delta"]);
-});
-
-test("toggleMembership removes a member from the selected stack", () => {
+test("removeMember drops the member under the cursor from the selected stack", () => {
   const model = makeModel();
   model.setFocus("members");
-  assert.equal(model.toggleMembership(), "removed");
-  assert.deepEqual(model.membersOf("one"), ["beta"]);
-  assert.ok(model.availableFor("one").includes("alpha"));
+  model.moveMember(1, 10); // onto beta
+  assert.equal(model.removeMember(), "removed");
+  assert.deepEqual(model.membersOf("one"), ["alpha"]);
+  assert.deepEqual(model.unstackedSkills(), ["beta", "delta"]);
+  assert.equal(model.memberIndex, 0, "cursor clamps back onto the remaining member");
 });
 
-test("toggleMembership is blocked for project-defined stacks", () => {
+test("removeMember is blocked for project-defined stacks and empty stacks", () => {
   const model = makeModel({ projectStackNames: ["one"] });
   model.setFocus("members");
-  assert.equal(model.toggleMembership(), "blocked");
+  assert.equal(model.removeMember(), "blocked");
   assert.deepEqual(model.membersOf("one"), ["alpha", "beta"]);
+
+  const empty = makeModel({ stacks: { one: [] } });
+  assert.equal(empty.removeMember(), "blocked");
 });
 
 test("membership changes update the excluded set immediately", () => {
-  const model = makeModel({ disabledStacks: ["one"] });
-  // alpha excluded: only stack "one" has it and "one" is off
-  assert.ok(!model.isActiveSkill("alpha"));
-  model.setFocus("members");
-  // add gamma (in "two", still enabled) — adding it keeps it active
-  model.moveMember(3, 10, 10); // flat: alpha, beta, delta, gamma → onto gamma
-  assert.equal(model.toggleMembership(), "added");
+  const model = makeModel({ disabledStacks: ["two"] });
+  // gamma excluded: only stack "two" has it and "two" is off
+  assert.ok(!model.isActiveSkill("gamma"));
+  // adding gamma to the enabled stack "one" makes it active again
+  assert.equal(model.addSkills(["gamma"]), "added");
   assert.ok(model.isActiveSkill("gamma"));
+  // removing alpha from "one" (the only stack holding it) leaves it unstacked, hence active
+  model.setFocus("members");
+  assert.equal(model.removeMember(), "removed");
+  assert.ok(model.isActiveSkill("alpha"));
 });
 
-test("missing skills stay in members and are flagged, not available", () => {
+test("missing skills stay in members and are flagged; they are not unstacked", () => {
   const model = makeModel({ stacks: { one: ["alpha", "ghost"] } });
   assert.deepEqual(model.membersOf("one"), ["alpha", "ghost"]);
   const members = model.memberWindow(10).items;
   const ghost = members.find((entry) => entry.name === "ghost")!;
   assert.ok(ghost.missing);
-  assert.ok(!model.availableFor("one").includes("ghost"));
+  assert.ok(!model.unstackedSkills().includes("ghost"));
 });
 
 test("createStack adds an empty stack, selects it, and rejects duplicates", () => {
@@ -132,46 +129,34 @@ test("snapshot returns a deep copy with sorted disabledStacks", () => {
   assert.ok(!model.membersOf("one").includes("mutated"));
 });
 
-test("moveMember clamps at both ends and crosses the members/available boundary", () => {
+test("moveMember clamps at both ends", () => {
   const model = makeModel();
   model.setFocus("members");
-  model.moveMember(-5, 10, 10);
+  model.moveMember(-5, 10);
   assert.equal(model.memberIndex, 0);
-  // members: alpha, beta; available: delta, gamma → flat length 4
-  model.moveMember(10, 10, 10);
-  assert.equal(model.memberIndex, 3);
-  model.moveMember(1, 10, 10); // clamped, no wrap
-  assert.equal(model.memberIndex, 3);
+  model.moveMember(10, 10); // members: alpha, beta
+  assert.equal(model.memberIndex, 1);
+  model.moveMember(1, 10); // clamped, no wrap
+  assert.equal(model.memberIndex, 1);
 });
 
-test("splitSectionRows: each section gets what it needs; only when both overflow is the space halved", () => {
-  // both fit: members take their count, available gets the rest
-  assert.deepEqual(splitSectionRows(40, 11, 20), { memberRows: 11, availableRows: 29 });
-  // members small, available huge: available gets everything members don't need
-  assert.deepEqual(splitSectionRows(40, 11, 65), { memberRows: 11, availableRows: 29 });
-  // members huge, available small: mirror image
-  assert.deepEqual(splitSectionRows(40, 65, 11), { memberRows: 29, availableRows: 11 });
-  // both overflow: halve
-  assert.deepEqual(splitSectionRows(40, 65, 65), { memberRows: 20, availableRows: 20 });
-  assert.deepEqual(splitSectionRows(41, 65, 65), { memberRows: 21, availableRows: 20 });
-  // empty members still gets one row for its hint; same for available
-  assert.deepEqual(splitSectionRows(40, 0, 65), { memberRows: 1, availableRows: 39 });
-  assert.deepEqual(splitSectionRows(40, 65, 0), { memberRows: 39, availableRows: 1 });
-  // tiny terminal: never below one row each
-  assert.deepEqual(splitSectionRows(2, 65, 65), { memberRows: 1, availableRows: 1 });
+test("unstackedSkills lists discovered skills that no stack holds", () => {
+  const model = makeModel(); // one: alpha, beta; two: gamma; discovered adds delta
+  assert.deepEqual(model.unstackedSkills(), ["delta"]);
+  model.toggleStack(); // disabling a stack does not unstack its skills
+  assert.deepEqual(model.unstackedSkills(), ["delta"]);
 });
 
-test("memberCursor reports the section and list-relative index of the flat cursor", () => {
+test("addSkills appends to the selected stack, skips duplicates, refuses project stacks", () => {
   const model = makeModel();
-  model.setFocus("members");
-  // members: alpha, beta; available: delta, gamma
-  assert.deepEqual(model.memberCursor, { section: "members", index: 0 });
-  model.moveMember(1, 10, 10);
-  assert.deepEqual(model.memberCursor, { section: "members", index: 1 });
-  model.moveMember(1, 10, 10);
-  assert.deepEqual(model.memberCursor, { section: "available", index: 0 });
-  model.moveMember(1, 10, 10);
-  assert.deepEqual(model.memberCursor, { section: "available", index: 1 });
+  assert.equal(model.addSkills(["delta", "alpha", "delta"]), "added");
+  assert.deepEqual(model.membersOf("one"), ["alpha", "beta", "delta"]);
+  assert.deepEqual(model.unstackedSkills(), []);
+  assert.equal(model.addSkills([]), "blocked");
+
+  const locked = makeModel({ projectStackNames: ["one"] });
+  assert.equal(locked.addSkills(["delta"]), "blocked");
+  assert.deepEqual(locked.membersOf("one"), ["alpha", "beta"]);
 });
 
 test("moveMember scrolls within each section based on the given rows", () => {
@@ -180,8 +165,8 @@ test("moveMember scrolls within each section based on the given rows", () => {
   });
   model.setFocus("members");
   // member window of 2 rows
-  model.moveMember(1, 2, 2);
-  model.moveMember(1, 2, 2);
+  model.moveMember(1, 2);
+  model.moveMember(1, 2);
   assert.equal(model.memberIndex, 2);
   assert.equal(model.memberWindow(2).start, 1);
 });
@@ -191,6 +176,7 @@ test("windows clamp when the list is shorter than the viewport", () => {
   const memberWin = model.memberWindow(10);
   assert.equal(memberWin.start, 0);
   assert.equal(memberWin.items.length, 1);
-  const availWin = model.availableWindow(10);
-  assert.equal(availWin.items.length, 3); // beta, gamma, delta
+  const stackWin = model.stackWindow(10);
+  assert.equal(stackWin.start, 0);
+  assert.equal(stackWin.items.length, 1);
 });

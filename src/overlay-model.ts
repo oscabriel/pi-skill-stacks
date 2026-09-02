@@ -1,5 +1,5 @@
 // Pure state machine behind the /stacks overlay: selection, scrolling, and
-// the mutation operations (toggle stack on/off, move skills between stacks,
+// the mutation operations (toggle stack on/off, add/remove members,
 // create/delete stacks). No I/O and no TUI here — extensions/overlay.ts
 // renders it and persists each mutation through a callback.
 //
@@ -35,18 +35,6 @@ export interface MemberRow {
   active: boolean;
 }
 
-export interface AvailableRow {
-  name: string;
-  /** Other stacks that also contain this skill. */
-  otherStacks: string[];
-}
-
-/** Where the flat right-pane cursor sits, as a section plus a list-relative index. */
-export interface MemberCursor {
-  section: "members" | "available";
-  index: number;
-}
-
 export interface Window<T> {
   start: number;
   items: T[];
@@ -65,34 +53,12 @@ function followIndex(offset: number, index: number, rows: number) {
   return offset;
 }
 
-/**
- * Split `content` rows between the members and available sections. A section
- * that fits gets exactly the rows it needs (min 1, for its empty-state hint) and
- * the other takes the rest; only when both overflow is the space halved.
- */
-export function splitSectionRows(content: number, memberCount: number, availableCount: number) {
-  const total = Math.max(2, content);
-  const memberWant = Math.max(1, memberCount);
-  const availableWant = Math.max(1, availableCount);
-  const half = Math.ceil(total / 2);
-
-  let memberRows: number;
-  if (memberWant + availableWant <= total) memberRows = memberWant;
-  else if (memberWant <= half) memberRows = memberWant;
-  else if (availableWant <= total - half) memberRows = total - availableWant;
-  else memberRows = half;
-
-  memberRows = clamp(memberRows, 1, total - 1);
-  return { memberRows, availableRows: total - memberRows };
-}
-
 export class StacksOverlayModel {
   focus: OverlayFocus = "stacks";
   stackIndex = 0;
   private stackOffset = 0;
   memberIndex = 0;
   private memberOffset = 0;
-  private availableOffset = 0;
 
   private readonly discovered: DiscoveredSkills;
   private readonly projectStackNames: ReadonlySet<string>;
@@ -131,14 +97,6 @@ export class StacksOverlayModel {
     return this.discovered.size;
   }
 
-  /** `memberIndex` is flat across members then available; renderers need it split. */
-  get memberCursor(): MemberCursor {
-    const memberCount = this.selectedMembers.length;
-    return this.memberIndex < memberCount
-      ? { section: "members", index: this.memberIndex }
-      : { section: "available", index: this.memberIndex - memberCount };
-  }
-
   stackList() {
     return [...this.names];
   }
@@ -155,14 +113,14 @@ export class StacksOverlayModel {
     return sortNames(this.stackMap[name] ?? []);
   }
 
-  /** Discovered skills not in the given stack, sorted. */
-  availableFor(name: string) {
-    const members = new Set(this.stackMap[name] ?? []);
-    return sortNames([...this.discovered.keys()].filter((skill) => !members.has(skill)));
-  }
-
   isActiveSkill(name: string) {
     return !this.excluded.has(name);
+  }
+
+  /** Discovered skills that no stack (enabled or not) contains, sorted. */
+  unstackedSkills() {
+    const stacked = new Set(Object.values(this.stackMap).flat());
+    return sortNames([...this.discovered.keys()].filter((skill) => !stacked.has(skill)));
   }
 
   /** Deep copy for persistence; disabled list sorted for stable config output. */
@@ -182,18 +140,11 @@ export class StacksOverlayModel {
     this.stackOffset = followIndex(this.stackOffset, this.stackIndex, rows);
   }
 
-  /** Flat movement across the members list then the available list. */
-  moveMember(delta: number, memberRows: number, availableRows: number) {
-    const total = this.flatMemberCount();
+  moveMember(delta: number, rows: number) {
+    const total = this.selectedMembers.length;
     if (total === 0) return;
     this.memberIndex = clamp(this.memberIndex + delta, 0, total - 1);
-    const memberCount = this.selectedMembers.length;
-    if (this.memberIndex < memberCount) {
-      this.memberOffset = followIndex(this.memberOffset, this.memberIndex, memberRows);
-    } else {
-      const index = this.memberIndex - memberCount;
-      this.availableOffset = followIndex(this.availableOffset, index, availableRows);
-    }
+    this.memberOffset = followIndex(this.memberOffset, this.memberIndex, rows);
   }
 
   // ---- windows for rendering ----
@@ -231,23 +182,6 @@ export class StacksOverlayModel {
     };
   }
 
-  availableWindow(rows: number): Window<AvailableRow> {
-    const available = this.selectedAvailable;
-    const visible = Math.max(1, rows);
-    const start = clamp(this.availableOffset, 0, Math.max(0, available.length - visible));
-    return {
-      start,
-      items: available.slice(start, start + visible).map((name) => ({
-        name,
-        otherStacks: sortNames(
-          Object.entries(this.stackMap)
-            .filter(([stack, skills]) => stack !== this.selectedStack && skills.includes(name))
-            .map(([stack]) => stack),
-        ),
-      })),
-    };
-  }
-
   // ---- mutations (each leaves the model consistent; caller persists) ----
 
   /** Flip the selected stack on/off. Always changes state. */
@@ -260,23 +194,25 @@ export class StacksOverlayModel {
     return true;
   }
 
-  /**
-   * Space on a member row removes the skill from the selected stack; on an
-   * available row it adds it. Blocked for project-defined stacks.
-   */
-  toggleMembership(): MembershipChange {
+  /** Remove the member under the cursor from the selected stack. Blocked for project-defined stacks. */
+  removeMember(): MembershipChange {
     const stack = this.selectedStack;
     if (!stack || this.projectStackNames.has(stack)) return "blocked";
-    const memberCount = this.selectedMembers.length;
-    if (this.memberIndex < memberCount) {
-      const skill = this.selectedMembers[this.memberIndex]!;
-      this.stackMap[stack] = (this.stackMap[stack] ?? []).filter((entry) => entry !== skill);
-      this.afterMembershipChange();
-      return "removed";
-    }
-    const skill = this.selectedAvailable[this.memberIndex - memberCount];
+    const skill = this.selectedMembers[this.memberIndex];
     if (!skill) return "blocked";
-    this.stackMap[stack] = [...(this.stackMap[stack] ?? []), skill];
+    this.stackMap[stack] = (this.stackMap[stack] ?? []).filter((entry) => entry !== skill);
+    this.afterMembershipChange();
+    return "removed";
+  }
+
+  /** Add skills to the selected stack (duplicates ignored). Blocked for project stacks or an empty list. */
+  addSkills(names: readonly string[]): MembershipChange {
+    const stack = this.selectedStack;
+    if (!stack || this.projectStackNames.has(stack)) return "blocked";
+    const current = this.stackMap[stack] ?? [];
+    const fresh = [...new Set(names)].filter((name) => !current.includes(name));
+    if (fresh.length === 0) return "blocked";
+    this.stackMap[stack] = [...current, ...fresh];
     this.afterMembershipChange();
     return "added";
   }
@@ -314,28 +250,18 @@ export class StacksOverlayModel {
     return stack ? this.membersOf(stack) : [];
   }
 
-  private get selectedAvailable() {
-    const stack = this.selectedStack;
-    return stack ? this.availableFor(stack) : [];
-  }
-
-  private flatMemberCount() {
-    return this.selectedMembers.length + this.selectedAvailable.length;
-  }
-
   private recomputeExcluded() {
     this.excluded = computeExcludedSkills(this.stackMap, [...this.disabled]);
   }
 
   private afterMembershipChange() {
     this.recomputeExcluded();
-    this.memberIndex = clamp(this.memberIndex, 0, Math.max(0, this.flatMemberCount() - 1));
+    this.memberIndex = clamp(this.memberIndex, 0, Math.max(0, this.selectedMembers.length - 1));
   }
 
   private resetMemberCursor() {
     this.memberIndex = 0;
     this.memberOffset = 0;
-    this.availableOffset = 0;
   }
 }
 

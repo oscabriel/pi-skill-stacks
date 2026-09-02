@@ -51,6 +51,7 @@ function makeOverlay(
       notify: () => {},
       input: async () => undefined,
       confirm: async () => false,
+      pick: async () => undefined,
       done: (result) => results.push(result),
     },
   );
@@ -94,8 +95,7 @@ test("render: empty state points at the create key", () => {
   assert.match(overlay.render(100).join("\n"), /no stacks · n creates one/);
 });
 
-test("render: exactly one cursor and one highlighted row in the right pane, in whichever section holds it", () => {
-  // three members, three available: an available row shares every member row's index
+test("render: exactly one cursor and one highlighted row in the right pane", () => {
   const { overlay } = makeOverlay(40, {
     stacks: { one: ["alpha", "beta", "gamma"] },
   });
@@ -106,7 +106,6 @@ test("render: exactly one cursor and one highlighted row in the right pane, in w
   // one highlighted row per pane: the selected stack on the left, the cursor row on the right
   const highlighted = (lines: string[]) => lines.join("").split("\x1b[48;5;8m").length - 1;
 
-  // cursor on member 1 (beta)
   overlay.handleInput("j");
   let lines = overlay.render(100);
   let cursors = cursorRows(lines);
@@ -114,13 +113,13 @@ test("render: exactly one cursor and one highlighted row in the right pane, in w
   assert.match(cursors[0]!, /\[x\] beta/);
   assert.equal(highlighted(lines), 2);
 
-  // cursor into available list, first row
+  // past the end: clamps on the last member, still one cursor
   overlay.handleInput("j");
   overlay.handleInput("j");
   lines = overlay.render(100);
   cursors = cursorRows(lines);
   assert.equal(cursors.length, 1, cursors.join("\n"));
-  assert.match(cursors[0]!, /\[ \] /);
+  assert.match(cursors[0]!, /\[x\] gamma/);
   assert.equal(highlighted(lines), 2);
 });
 
@@ -150,6 +149,7 @@ test("handleInput: settingsDirty sticks once any mutation changed settings", () 
       notify: () => {},
       input: async () => undefined,
       confirm: async () => false,
+      pick: async () => undefined,
       done: (result) => results.push(result),
     },
   );
@@ -175,6 +175,7 @@ test("handleInput: a rejected dialog reports the error and frees the keyboard", 
         throw new Error("dialog exploded");
       },
       confirm: async () => false,
+      pick: async () => undefined,
       done: () => {},
     },
   );
@@ -183,4 +184,49 @@ test("handleInput: a rejected dialog reports the error and frees the keyboard", 
   assert.match(notices.join("\n"), /dialog exploded/);
   overlay.handleInput(" "); // would be swallowed if dialogOpen were stuck
   assert.match(overlay.render(100).join("\n"), /\[ \]/);
+});
+
+test("handleInput: `a` offers only unstacked skills and adds what was picked", async () => {
+  const offered: (readonly string[])[] = [];
+  const notices: string[] = [];
+  let persisted: Record<string, string[]> | undefined;
+  const make = (stacks: Record<string, string[]>, discovered: string[], projectStacks: string[] = []) =>
+    new StacksOverlay(
+      { terminal: { rows: 40 }, requestRender: () => {} },
+      fakeTheme,
+      { stacks, disabledStacks: [], discovered: skillsOnDisk(...discovered), projectStackNames: new Set(projectStacks) },
+      {
+        persist: (next) => {
+          persisted = next;
+          return outcome(false);
+        },
+        notify: (message) => notices.push(message),
+        input: async () => undefined,
+        confirm: async () => false,
+        pick: async (_title, items) => {
+          offered.push(items);
+          return [items[0]!];
+        },
+        done: () => {},
+      },
+    );
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  // gamma is in "two", so only delta is unstacked; picking it adds to the selected stack "one"
+  make({ one: ["alpha"], two: ["gamma"] }, ["alpha", "gamma", "delta"]).handleInput("a");
+  await tick();
+  assert.deepEqual(offered, [["delta"]]);
+  assert.deepEqual(persisted?.one, ["alpha", "delta"]);
+
+  // nothing unstacked: notice, no dialog
+  make({ one: ["alpha"] }, ["alpha"]).handleInput("a");
+  await tick();
+  assert.equal(offered.length, 1);
+  assert.match(notices.at(-1)!, /already in a stack/);
+
+  // project stack: notice, no dialog
+  make({ one: ["alpha"] }, ["alpha", "delta"], ["one"]).handleInput("a");
+  await tick();
+  assert.equal(offered.length, 1);
+  assert.match(notices.at(-1)!, /\.pi\/skill-stacks\.json/);
 });

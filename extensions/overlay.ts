@@ -1,6 +1,6 @@
-// Two-pane overlay for /stacks: stacks on the left (on/off, create, delete),
-// members + available skills of the selected stack on the right (space moves
-// a skill in or out of the stack). Every mutation is persisted immediately
+// Two-pane overlay for /stacks: stacks on the left (on/off, create, delete,
+// `a` to add unstacked skills), the selected stack's members on the right
+// (space removes one). Every mutation is persisted immediately
 // through the caller's callback; the ctx.reload() that makes pi pick the
 // changes up happens once, after the overlay closes, and only if settings.json
 // actually changed (re-stacking alone doesn't need one).
@@ -17,13 +17,11 @@ import {
   truncateToWidth,
   visibleWidth,
 } from "@earendil-works/pi-tui";
-import { ConfirmDialog, PromptDialog } from "./dialogs.ts";
+import { ConfirmDialog, PickDialog, PromptDialog } from "./dialogs.ts";
 import { frameEdge, type OverlayTheme, padToWidth } from "./frame.ts";
 import type { StackMap, StacksSummary } from "../src/core.ts";
 import {
-  splitSectionRows,
   StacksOverlayModel,
-  type AvailableRow,
   type MemberRow,
   type StackRow,
   type StacksOverlayInit,
@@ -52,6 +50,8 @@ export interface StacksOverlayCallbacks {
   notify: Notify;
   input: (title: string, placeholder?: string) => Promise<string | undefined>;
   confirm: (title: string, message: string) => Promise<boolean>;
+  /** Multi-select from `items`; undefined when cancelled. */
+  pick: (title: string, items: readonly string[]) => Promise<string[] | undefined>;
   done: (result: OverlayResult) => void;
 }
 
@@ -102,7 +102,6 @@ export class StacksOverlay {
   }
 
   private handleStacksInput(data: string) {
-    const { memberRows, availableRows } = this.sectionRows();
     if (matchesKey(data, Key.escape) || data === "q") {
       this.callbacks.done({
         changed: this.changed,
@@ -124,17 +123,18 @@ export class StacksOverlay {
       data === "l"
     ) {
       this.model.setFocus("members");
-      this.model.moveMember(0, memberRows, availableRows);
+      this.model.moveMember(0, this.memberRows());
       this.tui.requestRender();
     } else if (data === "n") {
       this.openNewStackDialog();
     } else if (data === "d") {
       this.openDeleteDialog();
+    } else if (data === "a") {
+      this.openAddDialog();
     }
   }
 
   private handleMembersInput(data: string) {
-    const { memberRows, availableRows } = this.sectionRows();
     if (
       matchesKey(data, Key.escape) ||
       matchesKey(data, Key.left) ||
@@ -144,13 +144,15 @@ export class StacksOverlay {
       this.model.setFocus("stacks");
       this.tui.requestRender();
     } else if (matchesKey(data, Key.down) || data === "j") {
-      this.model.moveMember(1, memberRows, availableRows);
+      this.model.moveMember(1, this.memberRows());
       this.tui.requestRender();
     } else if (matchesKey(data, Key.up) || data === "k") {
-      this.model.moveMember(-1, memberRows, availableRows);
+      this.model.moveMember(-1, this.memberRows());
       this.tui.requestRender();
+    } else if (data === "a") {
+      this.openAddDialog();
     } else if (data === " ") {
-      const change = this.model.toggleMembership();
+      const change = this.model.removeMember();
       if (change !== "blocked") {
         this.apply();
       } else if (this.model.selectedStack && this.model.isProjectStack(this.model.selectedStack)) {
@@ -162,7 +164,6 @@ export class StacksOverlay {
   render(width: number) {
     const rows = this.bodyRows();
     const { leftW, rightW } = this.paneWidths(width);
-    const { memberRows, availableRows } = this.sectionRows();
     const stack = this.model.selectedStack;
 
     const dirty = this.settingsDirty ? this.theme.fg("warning", " · reload pending") : "";
@@ -172,8 +173,7 @@ export class StacksOverlay {
     const lines = [this.border(width, title, true)];
 
     const stackWin = this.model.stackWindow(rows);
-    const memberWin = this.model.memberWindow(memberRows);
-    const availWin = this.model.availableWindow(availableRows);
+    const memberWin = this.model.memberWindow(this.memberRows());
     const blank = (w: number) => " ".repeat(w);
     const hint = (text: string, w: number) => padToWidth(this.theme.fg("dim", text), w);
 
@@ -190,23 +190,13 @@ export class StacksOverlay {
         right = this.renderStackHeader(stack, rightW);
       } else if (row === 1) {
         right = hint(" members", rightW);
-      } else if (row < 2 + memberRows) {
+      } else {
         const index = row - 2;
         const entry = memberWin.items[index];
         right = entry
           ? this.renderMemberCell(entry, memberWin.start + index, rightW)
           : index === 0
-            ? hint(" (none — space a skill below to add)", rightW)
-            : blank(rightW);
-      } else if (row === 2 + memberRows) {
-        right = hint(` available · ${this.model.availableFor(stack).length}`, rightW);
-      } else {
-        const index = row - 3 - memberRows;
-        const entry = availWin.items[index];
-        right = entry
-          ? this.renderAvailableCell(entry, availWin.start + index, rightW)
-          : index === 0
-            ? hint(" (every discovered skill is in this stack)", rightW)
+            ? hint(" (none · a adds skills)", rightW)
             : blank(rightW);
       }
 
@@ -217,8 +207,8 @@ export class StacksOverlay {
 
     const help =
       this.model.focus === "stacks"
-        ? "↑↓ select · space on/off · →/tab members · n new stack · d delete · esc close"
-        : "↑↓ move · space add/remove · ←/tab back";
+        ? "↑↓ select · space on/off · →/tab members · a add skills · n new stack · d delete · esc close"
+        : "↑↓ move · space remove · a add skills · ←/tab back";
     lines.push(this.border(width, help, false));
     return lines;
   }
@@ -276,20 +266,32 @@ export class StacksOverlay {
     });
   }
 
+  /** `a`: pick from the skills no stack holds yet and add them to the selected stack. */
+  private openAddDialog() {
+    const name = this.model.selectedStack;
+    if (!name) return;
+    if (this.model.isProjectStack(name)) {
+      this.callbacks.notify(projectStackNotice(name), "warning");
+      return;
+    }
+    const unstacked = this.model.unstackedSkills();
+    if (unstacked.length === 0) {
+      this.callbacks.notify("Every discovered skill is already in a stack", "info");
+      return;
+    }
+    void this.withDialog(async () => {
+      const picked = await this.callbacks.pick(`Add to ${name} · ${unstacked.length} unstacked`, unstacked);
+      if (picked && this.model.addSkills(picked) === "added") this.apply();
+    });
+  }
+
   private bodyRows() {
     return Math.max(8, Math.floor(this.tui.terminal.rows * 0.8) - 2);
   }
 
-  /**
-   * Right-pane layout: 1 stack header + members section + available section
-   * (each with a label row). Sections are sized to the selected stack's content.
-   */
-  private sectionRows() {
-    const content = Math.max(2, this.bodyRows() - 1 - 2);
-    const stack = this.model.selectedStack;
-    const memberCount = stack ? this.model.membersOf(stack).length : 0;
-    const availableCount = stack ? this.model.availableFor(stack).length : 0;
-    return splitSectionRows(content, memberCount, availableCount);
+  /** Right pane: 1 stack header row + 1 "members" label row, then the list. */
+  private memberRows() {
+    return Math.max(1, this.bodyRows() - 2);
   }
 
   private paneWidths(width: number) {
@@ -334,8 +336,7 @@ export class StacksOverlay {
   }
 
   private renderMemberCell(entry: MemberRow, index: number, width: number) {
-    const cursor = this.model.memberCursor;
-    const selected = cursor.section === "members" && index === cursor.index;
+    const selected = index === this.model.memberIndex;
     const focused = selected && this.model.focus === "members";
     const suffixText = entry.missing ? " missing" : entry.active ? "" : " · excluded";
     const suffix = entry.missing
@@ -348,19 +349,6 @@ export class StacksOverlay {
     return selected ? this.selectedBg(row, "members") : row;
   }
 
-  private renderAvailableCell(entry: AvailableRow, index: number, width: number) {
-    const cursor = this.model.memberCursor;
-    const selected = cursor.section === "available" && index === cursor.index;
-    const focused = selected && this.model.focus === "members";
-    const suffixText = entry.otherStacks.length > 0 ? ` · ${entry.otherStacks.join(", ")}` : "";
-    const nameWidth = Math.max(1, width - CELL_PREFIX_WIDTH - suffixText.length);
-    const shown = truncateToWidth(entry.name, nameWidth, "…");
-    const row = padToWidth(
-      `${focused ? CURSOR : NO_CURSOR}[ ] ${this.theme.fg("muted", shown)}${this.theme.fg("dim", suffixText)}`,
-      width,
-    );
-    return selected ? this.selectedBg(row, "members") : row;
-  }
 }
 
 export async function showStacksOverlay(
@@ -390,6 +378,11 @@ export async function showStacksOverlay(
         confirm: (title, message) =>
           ctx.ui.custom<boolean>(
             (_tui, theme, _kb, done) => new ConfirmDialog(theme, title, message, done),
+            dialogOptions,
+          ),
+        pick: (title, items) =>
+          ctx.ui.custom<string[] | undefined>(
+            (_tui, theme, _kb, done) => new PickDialog(theme, title, items, done),
             dialogOptions,
           ),
         done,
