@@ -2,21 +2,36 @@
 // members + available skills of the selected stack on the right (space moves
 // a skill in or out of the stack). Every mutation is persisted immediately
 // through the caller's callback; the ctx.reload() that makes pi pick the
-// changes up happens once, after the overlay closes.
+// changes up happens once, after the overlay closes, and only if settings.json
+// actually changed (re-stacking alone doesn't need one).
 //
 // StacksOverlay is a plain component (render/handleInput/invalidate) so it can
 // be smoke-tested without a live pi session; showStacksOverlay wires it into
 // the TUI.
 
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import type { StackMap, StacksSummary } from "../src/core.ts";
-import { StacksOverlayModel, type StacksOverlayInit } from "../src/overlay-model.ts";
+import type { ExtensionCommandContext, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { StackMap, StacksSummary } from "../src/core.ts";
+import {
+  StacksOverlayModel,
+  type AvailableRow,
+  type MemberRow,
+  type StackRow,
+  type StacksOverlayInit,
+} from "../src/overlay-model.ts";
 
 export interface ApplyOutcome {
   summary: StacksSummary;
-  missing: Record<string, string[]>;
+  /** True when settings.json was rewritten, i.e. pi needs a reload to notice. */
   settingsChanged: boolean;
+}
+
+export interface OverlayResult {
+  /** Any mutation happened while the overlay was open. */
+  changed: boolean;
+  /** Some mutation rewrote settings.json; the caller should ctx.reload(). */
+  settingsDirty: boolean;
+  outcome: ApplyOutcome | null;
 }
 
 export type StacksPersist = (stacks: StackMap, disabledStacks: string[]) => ApplyOutcome;
@@ -28,89 +43,93 @@ export interface StacksOverlayCallbacks {
   notify: Notify;
   input: (title: string, placeholder?: string) => Promise<string | undefined>;
   confirm: (title: string, message: string) => Promise<boolean>;
-  done: (result: { changed: boolean; outcome: ApplyOutcome | null }) => void;
+  done: (result: OverlayResult) => void;
 }
 
-/** Minimal slices of pi-tui's TUI and Theme the overlay touches. */
+/** Minimal slices of pi-tui's TUI and Theme the overlay touches (kept small so tests can fake them). */
 export interface OverlayTui {
   terminal: { rows: number };
   requestRender(): void;
 }
 
 export interface OverlayTheme {
-  fg(color: string, text: string): string;
-  bg(color: string, text: string): string;
+  fg(color: ThemeColor, text: string): string;
+  bg(color: "selectedBg" | "customMessageBg", text: string): string;
   bold(text: string): string;
 }
 
-interface InitWithDiscovered extends StacksOverlayInit {
-  discovered: ReadonlySet<string>;
-}
+const CURSOR = "› ";
+const NO_CURSOR = "  ";
+/** `cursor + "[x]" + " "` before a name in every cell. */
+const CELL_PREFIX_WIDTH = CURSOR.length + 3 + 1;
+
+const projectStackNotice = (stack: string) =>
+  `"${stack}" is defined in .pi/skill-stacks.json; edit it there`;
 
 export class StacksOverlay {
   private readonly model: StacksOverlayModel;
   private readonly tui: OverlayTui;
   private readonly theme: OverlayTheme;
   private readonly callbacks: StacksOverlayCallbacks;
-  private readonly discovered: ReadonlySet<string>;
   private changed = false;
+  private settingsDirty = false;
   private lastOutcome: ApplyOutcome | null = null;
   private dialogOpen = false;
 
-  constructor(tui: OverlayTui, theme: OverlayTheme, init: InitWithDiscovered, callbacks: StacksOverlayCallbacks) {
+  constructor(
+    tui: OverlayTui,
+    theme: OverlayTheme,
+    init: StacksOverlayInit,
+    callbacks: StacksOverlayCallbacks,
+  ) {
     this.tui = tui;
     this.theme = theme;
     this.callbacks = callbacks;
-    this.discovered = init.discovered;
     this.model = new StacksOverlayModel(init);
   }
 
-  invalidate(): void {}
+  invalidate() {}
 
-  handleInput(data: string): void {
+  handleInput(data: string) {
+    if (this.dialogOpen) return; // a dialog owns the keyboard until its promise settles
+    if (this.model.focus === "stacks") this.handleStacksInput(data);
+    else this.handleMembersInput(data);
+  }
+
+  private handleStacksInput(data: string) {
     const { memberRows, availableRows } = this.sectionRows();
-
-    if (this.model.focus === "stacks") {
-      if (matchesKey(data, Key.escape) || data === "q") {
-        this.callbacks.done({ changed: this.changed, outcome: this.lastOutcome });
-        return;
-      }
-      if (matchesKey(data, Key.down) || data === "j") {
-        this.model.moveStack(1, this.bodyRows());
-        this.tui.requestRender();
-        return;
-      }
-      if (matchesKey(data, Key.up) || data === "k") {
-        this.model.moveStack(-1, this.bodyRows());
-        this.tui.requestRender();
-        return;
-      }
-      if (data === " ") {
-        if (this.model.toggleStack()) this.apply();
-        return;
-      }
-      if (
-        matchesKey(data, Key.enter) ||
-        matchesKey(data, Key.right) ||
-        matchesKey(data, Key.tab) ||
-        data === "l"
-      ) {
-        this.model.setFocus("members");
-        this.tui.requestRender();
-        return;
-      }
-      if (data === "n") {
-        this.openNewStackDialog();
-        return;
-      }
-      if (data === "d") {
-        this.openDeleteDialog();
-        return;
-      }
-      return;
+    if (matchesKey(data, Key.escape) || data === "q") {
+      this.callbacks.done({
+        changed: this.changed,
+        settingsDirty: this.settingsDirty,
+        outcome: this.lastOutcome,
+      });
+    } else if (matchesKey(data, Key.down) || data === "j") {
+      this.model.moveStack(1, this.bodyRows());
+      this.tui.requestRender();
+    } else if (matchesKey(data, Key.up) || data === "k") {
+      this.model.moveStack(-1, this.bodyRows());
+      this.tui.requestRender();
+    } else if (data === " ") {
+      if (this.model.toggleStack()) this.apply();
+    } else if (
+      matchesKey(data, Key.enter) ||
+      matchesKey(data, Key.right) ||
+      matchesKey(data, Key.tab) ||
+      data === "l"
+    ) {
+      this.model.setFocus("members");
+      this.model.moveMember(0, memberRows, availableRows);
+      this.tui.requestRender();
+    } else if (data === "n") {
+      this.openNewStackDialog();
+    } else if (data === "d") {
+      this.openDeleteDialog();
     }
+  }
 
-    // members focus
+  private handleMembersInput(data: string) {
+    const { memberRows, availableRows } = this.sectionRows();
     if (
       matchesKey(data, Key.escape) ||
       matchesKey(data, Key.left) ||
@@ -119,158 +138,156 @@ export class StacksOverlay {
     ) {
       this.model.setFocus("stacks");
       this.tui.requestRender();
-      return;
-    }
-    if (matchesKey(data, Key.down) || data === "j") {
+    } else if (matchesKey(data, Key.down) || data === "j") {
       this.model.moveMember(1, memberRows, availableRows);
       this.tui.requestRender();
-      return;
-    }
-    if (matchesKey(data, Key.up) || data === "k") {
+    } else if (matchesKey(data, Key.up) || data === "k") {
       this.model.moveMember(-1, memberRows, availableRows);
       this.tui.requestRender();
-      return;
-    }
-    if (data === " ") {
+    } else if (data === " ") {
       const change = this.model.toggleMembership();
-      if (change === "blocked") {
-        const stack = this.model.selectedStack;
-        if (stack && this.model.isProjectStack(stack)) {
-          this.callbacks.notify(
-            `"${stack}" is defined in .pi/skill-stacks.json; edit it there`,
-            "warning",
-          );
-        }
-        return;
+      if (change !== "blocked") {
+        this.apply();
+      } else if (this.model.selectedStack && this.model.isProjectStack(this.model.selectedStack)) {
+        this.callbacks.notify(projectStackNotice(this.model.selectedStack), "warning");
       }
-      this.apply();
     }
   }
 
-  render(width: number): string[] {
+  render(width: number) {
     const rows = this.bodyRows();
     const { leftW, rightW } = this.paneWidths(width);
     const { memberRows, availableRows } = this.sectionRows();
     const stack = this.model.selectedStack;
 
-    const activeCount = [...this.discovered].filter((skill) => this.model.isActiveSkill(skill)).length;
-    const total = this.discovered.size;
-    const dirty = this.changed ? this.theme.fg("warning", " · reload pending") : "";
+    const dirty = this.settingsDirty ? this.theme.fg("warning", " · reload pending") : "";
     const title = `skill stacks · ${this.model.stackCount} ${
       this.model.stackCount === 1 ? "stack" : "stacks"
-    } · ${activeCount}/${total} skills active${dirty}`;
+    } · ${this.model.activeSkillCount}/${this.model.discoveredCount} skills active${dirty}`;
     const lines = [this.border(width, title, true)];
 
     const stackWin = this.model.stackWindow(rows);
     const memberWin = this.model.memberWindow(memberRows);
     const availWin = this.model.availableWindow(availableRows);
+    const blank = (w: number) => " ".repeat(w);
+    const hint = (text: string, w: number) => padToWidth(this.theme.fg("dim", text), w);
 
     for (let row = 0; row < rows; row += 1) {
       const stackEntry = stackWin.items[row];
       const left = stackEntry
-        ? this.renderStackCell(stackEntry.name, stackWin.start + row, leftW)
-        : " ".repeat(leftW);
+        ? this.renderStackCell(stackEntry, stackWin.start + row, leftW)
+        : blank(leftW);
 
       let right: string;
       if (!stack) {
-        right = padToWidth(this.theme.fg("dim", " no stacks"), rightW);
+        right = row === 0 ? hint(" no stacks · n creates one", rightW) : blank(rightW);
       } else if (row === 0) {
         right = this.renderStackHeader(stack, rightW);
       } else if (row === 1) {
-        right = padToWidth(this.theme.fg("dim", " members"), rightW);
+        right = hint(" members", rightW);
       } else if (row < 2 + memberRows) {
-        const entry = memberWin.items[row - 2];
+        const index = row - 2;
+        const entry = memberWin.items[index];
         right = entry
-          ? this.renderMemberCell(entry.name, memberWin.start + (row - 2), rightW)
-          : row - 2 === 0
-            ? padToWidth(this.theme.fg("dim", " (none — space a skill below to add)"), rightW)
-            : "";
+          ? this.renderMemberCell(entry, memberWin.start + index, rightW)
+          : index === 0
+            ? hint(" (none — space a skill below to add)", rightW)
+            : blank(rightW);
       } else if (row === 2 + memberRows) {
-        const available = this.model.availableFor(stack);
-        right = padToWidth(this.theme.fg("dim", ` available · ${available.length}`), rightW);
+        right = hint(` available · ${this.model.availableFor(stack).length}`, rightW);
       } else {
-        const entry = availWin.items[row - 3 - memberRows];
+        const index = row - 3 - memberRows;
+        const entry = availWin.items[index];
         right = entry
-          ? this.renderAvailableCell(entry.name, entry.otherStacks, availWin.start + (row - 3 - memberRows), rightW)
-          : row - 3 - memberRows === 0
-            ? padToWidth(this.theme.fg("dim", " (every discovered skill is in this stack)"), rightW)
-            : "";
+          ? this.renderAvailableCell(entry, availWin.start + index, rightW)
+          : index === 0
+            ? hint(" (every discovered skill is in this stack)", rightW)
+            : blank(rightW);
       }
 
       const mid = this.theme.fg(this.model.focus === "members" ? "borderAccent" : "borderMuted", "│");
-      lines.push(
-        `${this.theme.fg("borderMuted", "│")}${left}${mid}${right}${this.theme.fg("borderMuted", "│")}`,
-      );
+      const edge = this.theme.fg("borderMuted", "│");
+      lines.push(`${edge}${left}${mid}${right}${edge}`);
     }
 
     const help =
       this.model.focus === "stacks"
-        ? "↑↓ select · space on/off · →/tab members · n new stack · d delete · esc done"
-        : "↑↓ move · space add/remove · ←/tab back · esc back";
+        ? "↑↓ select · space on/off · →/tab members · n new stack · d delete · esc close"
+        : "↑↓ move · space add/remove · ←/tab back";
     lines.push(this.border(width, help, false));
     return lines;
   }
 
   // ---- internals ----
 
-  private apply(): void {
+  private apply() {
     const snapshot = this.model.snapshot();
     this.lastOutcome = this.callbacks.persist(snapshot.stacks, snapshot.disabledStacks);
     this.changed = true;
+    this.settingsDirty ||= this.lastOutcome.settingsChanged;
     this.tui.requestRender();
   }
 
-  private openNewStackDialog(): void {
+  /** Run a dialog; while it is open no overlay keys are handled, and a rejected dialog can't wedge the flag. */
+  private async withDialog(run: () => Promise<void>) {
     if (this.dialogOpen) return;
     this.dialogOpen = true;
-    void this.callbacks.input("New stack name", "e.g. writing").then((name) => {
+    try {
+      await run();
+    } catch (error) {
+      this.callbacks.notify(`skill-stacks: ${error instanceof Error ? error.message : error}`, "error");
+    } finally {
       this.dialogOpen = false;
-      const trimmed = name?.trim();
-      if (!trimmed) return;
-      if (!this.model.createStack(trimmed)) {
-        this.callbacks.notify(`Stack "${trimmed}" already exists`, "warning");
+      this.tui.requestRender();
+    }
+  }
+
+  private openNewStackDialog() {
+    void this.withDialog(async () => {
+      const name = (await this.callbacks.input("New stack name", "e.g. writing"))?.trim();
+      if (!name) return;
+      if (!this.model.createStack(name)) {
+        this.callbacks.notify(`Stack "${name}" already exists`, "warning");
         return;
       }
       this.apply();
     });
   }
 
-  private openDeleteDialog(): void {
+  private openDeleteDialog() {
     const name = this.model.selectedStack;
     if (!name) return;
     if (this.model.isProjectStack(name)) {
-      this.callbacks.notify(`"${name}" is defined in .pi/skill-stacks.json; edit it there`, "warning");
+      this.callbacks.notify(projectStackNotice(name), "warning");
       return;
     }
-    if (this.dialogOpen) return;
-    this.dialogOpen = true;
     const count = this.model.membersOf(name).length;
-    void this.callbacks
-      .confirm("Delete stack", `Remove "${name}" and its ${count} skill assignments?`)
-      .then((confirmed) => {
-        this.dialogOpen = false;
-        if (!confirmed) return;
-        if (this.model.deleteSelectedStack() === "deleted") this.apply();
-      });
+    void this.withDialog(async () => {
+      const confirmed = await this.callbacks.confirm(
+        "Delete stack",
+        `Remove "${name}" and its ${count} skill assignments?`,
+      );
+      if (confirmed && this.model.deleteSelectedStack() === "deleted") this.apply();
+    });
   }
 
-  private bodyRows(): number {
+  private bodyRows() {
     return Math.max(8, Math.floor(this.tui.terminal.rows * 0.8) - 2);
   }
 
-  /** Right-pane layout: 1 stack header + members section + available section. */
-  private sectionRows(): { memberRows: number; availableRows: number } {
+  /** Right-pane layout: 1 stack header + members section + available section (each with a label row). */
+  private sectionRows() {
     const content = Math.max(2, this.bodyRows() - 1 - 2);
     const memberRows = Math.max(1, Math.ceil(content / 2));
     return { memberRows, availableRows: Math.max(1, content - memberRows) };
   }
 
-  private paneWidths(width: number): { leftW: number; rightW: number } {
+  private paneWidths(width: number) {
     const leftW = Math.min(30, Math.max(18, Math.floor(width * 0.3)));
     return { leftW, rightW: Math.max(1, width - leftW - 3) };
   }
 
-  private border(width: number, label: string, top: boolean): string {
+  private border(width: number, label: string, top: boolean) {
     const left = top ? "┌" : "└";
     const right = top ? "┐" : "┘";
     const text = `─ ${label} `;
@@ -281,96 +298,79 @@ export class StacksOverlay {
     );
   }
 
-  private renderStackHeader(stack: string, width: number): string {
-    const enabled = !this.model.isDisabled(stack);
-    const members = this.model.membersOf(stack);
-    const found = members.filter((skill) => this.discovered.has(skill)).length;
-    const header = ` ${stack} · ${found}/${members.length} skills${enabled ? "" : " · off"}${
-      this.model.isProjectStack(stack) ? " · project-defined" : ""
+  private renderStackHeader(stack: string, width: number) {
+    const row = this.model.stackRow(stack);
+    const header = ` ${stack} · ${row.found}/${row.total} skills${row.enabled ? "" : " · off"}${
+      row.project ? " · project-defined" : ""
     }`;
-    return padToWidth(this.theme.fg(enabled ? "accent" : "muted", this.theme.bold(header)), width);
+    return padToWidth(this.theme.fg(row.enabled ? "accent" : "muted", this.theme.bold(header)), width);
   }
 
-  private renderStackCell(name: string, index: number, leftW: number): string {
-    const enabled = !this.model.isDisabled(name);
-    const selected = index === this.model.stackIndex;
-    const cursor = selected && this.model.focus === "stacks" ? "› " : "  ";
-    const box = enabled ? "[x]" : "[ ]";
-    const members = this.model.membersOf(name);
-    const found = members.filter((skill) => this.discovered.has(skill)).length;
-    const total = members.length;
-    const count = found === total ? `${total}` : `${found}/${total}`;
-    const project = this.model.isProjectStack(name) ? this.theme.fg("dim", " ·proj") : "";
+  private selectedBg(row: string, pane: "stacks" | "members") {
+    return this.theme.bg(this.model.focus === pane ? "selectedBg" : "customMessageBg", row);
+  }
 
-    const nameWidth = Math.max(1, leftW - 2 - 3 - 1 - count.length - 2);
-    const shown = truncateToWidth(name, nameWidth, "…");
+  private renderStackCell(entry: StackRow, index: number, leftW: number) {
+    const selected = index === this.model.stackIndex;
+    const focused = selected && this.model.focus === "stacks";
+    const count = entry.found === entry.total ? `${entry.total}` : `${entry.found}/${entry.total}`;
+    const projectTag = entry.project ? " ·proj" : "";
+    const tone = entry.enabled ? "text" : "muted";
+
+    const nameWidth = Math.max(1, leftW - CELL_PREFIX_WIDTH - projectTag.length - count.length - 2);
+    const shown = truncateToWidth(entry.name, nameWidth, "…");
     const label =
-      cursor +
-      this.theme.fg(enabled ? "text" : "muted", box) +
+      (focused ? CURSOR : NO_CURSOR) +
+      this.theme.fg(tone, entry.enabled ? "[x]" : "[ ]") +
       " " +
-      (selected && this.model.focus === "stacks"
-        ? this.theme.fg("accent", shown)
-        : this.theme.fg(enabled ? "text" : "muted", shown)) +
-      project;
+      this.theme.fg(focused ? "accent" : tone, shown) +
+      this.theme.fg("dim", projectTag);
     const gap = Math.max(1, leftW - visibleWidth(label) - count.length);
     const row = padToWidth(`${label}${" ".repeat(gap)}${this.theme.fg("dim", count)}`, leftW);
-    if (!selected) return row;
-    return this.theme.bg(this.model.focus === "stacks" ? "selectedBg" : "customMessageBg", row);
+    return selected ? this.selectedBg(row, "stacks") : row;
   }
 
-  private renderMemberCell(name: string, index: number, width: number): string {
+  private renderMemberCell(entry: MemberRow, index: number, width: number) {
     const selected = index === this.model.memberIndex;
-    const cursor = selected && this.model.focus === "members" ? "› " : "  ";
-    const missing = !this.discovered.has(name);
-    const active = this.model.isActiveSkill(name);
-    const suffix = missing
-      ? this.theme.fg("warning", " missing")
-      : active
-        ? ""
-        : this.theme.fg("dim", " · excluded");
-    const suffixWidth = missing ? 8 : active ? 0 : 11;
-    const shown = truncateToWidth(name, Math.max(1, width - 2 - 3 - 1 - suffixWidth), "…");
-    const label =
-      cursor +
-      "[x]" +
-      " " +
-      this.theme.fg(missing ? "warning" : active ? "text" : "muted", shown) +
-      suffix;
-    const row = padToWidth(label, width);
-    if (!selected) return row;
-    return this.theme.bg(this.model.focus === "members" ? "selectedBg" : "customMessageBg", row);
+    const focused = selected && this.model.focus === "members";
+    const suffixText = entry.missing ? " missing" : entry.active ? "" : " · excluded";
+    const suffix = entry.missing
+      ? this.theme.fg("warning", suffixText)
+      : this.theme.fg("dim", suffixText);
+    const nameWidth = Math.max(1, width - CELL_PREFIX_WIDTH - suffixText.length);
+    const shown = truncateToWidth(entry.name, nameWidth, "…");
+    const tone = entry.missing ? "warning" : entry.active ? "text" : "muted";
+    const row = padToWidth(`${focused ? CURSOR : NO_CURSOR}[x] ${this.theme.fg(tone, shown)}${suffix}`, width);
+    return selected ? this.selectedBg(row, "members") : row;
   }
 
-  private renderAvailableCell(
-    name: string,
-    others: string[],
-    index: number,
-    width: number,
-  ): string {
+  private renderAvailableCell(entry: AvailableRow, index: number, width: number) {
     const selected = index === this.model.memberIndex;
-    const cursor = selected && this.model.focus === "members" ? "› " : "  ";
-    const suffix = others.length > 0 ? this.theme.fg("dim", ` · ${others.join(", ")}`) : "";
-    const suffixWidth = others.length > 0 ? 3 + others.join(", ").length : 0;
-    const shown = truncateToWidth(name, Math.max(1, width - 2 - 3 - 1 - suffixWidth), "…");
-    const row = padToWidth(`${cursor}[ ] ${this.theme.fg("muted", shown)}${suffix}`, width);
-    if (!selected) return row;
-    return this.theme.bg(this.model.focus === "members" ? "selectedBg" : "customMessageBg", row);
+    const focused = selected && this.model.focus === "members";
+    const suffixText = entry.otherStacks.length > 0 ? ` · ${entry.otherStacks.join(", ")}` : "";
+    const nameWidth = Math.max(1, width - CELL_PREFIX_WIDTH - suffixText.length);
+    const shown = truncateToWidth(entry.name, nameWidth, "…");
+    const row = padToWidth(
+      `${focused ? CURSOR : NO_CURSOR}[ ] ${this.theme.fg("muted", shown)}${this.theme.fg("dim", suffixText)}`,
+      width,
+    );
+    return selected ? this.selectedBg(row, "members") : row;
   }
 }
 
-function padToWidth(text: string, width: number): string {
+function padToWidth(text: string, width: number) {
   const truncated = truncateToWidth(text, width, "");
   return `${truncated}${" ".repeat(Math.max(0, width - visibleWidth(truncated)))}`;
 }
 
 export async function showStacksOverlay(
   ctx: ExtensionCommandContext,
-  init: InitWithDiscovered,
+  init: StacksOverlayInit,
   persist: StacksPersist,
-): Promise<{ changed: boolean; outcome: ApplyOutcome | null }> {
-  if (ctx.mode !== "tui") return { changed: false, outcome: null };
+): Promise<OverlayResult> {
+  if (ctx.mode !== "tui") return { changed: false, settingsDirty: false, outcome: null };
 
-  return await ctx.ui.custom<{ changed: boolean; outcome: ApplyOutcome | null }>(
+  return await ctx.ui.custom<OverlayResult>(
     (tui, theme, _kb, done) =>
       new StacksOverlay(tui, theme, init, {
         persist,

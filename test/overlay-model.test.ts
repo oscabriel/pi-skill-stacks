@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { StacksOverlayModel } from "../src/overlay-model.ts";
+import { skillsOnDisk } from "./helpers.ts";
 
 function makeModel(overrides?: {
   stacks?: Record<string, string[]>;
   disabledStacks?: string[];
   projectStackNames?: string[];
 }) {
-  const discovered = new Set(["alpha", "beta", "gamma", "delta"]);
+  const discovered = skillsOnDisk("alpha", "beta", "gamma", "delta");
   return new StacksOverlayModel({
     stacks: overrides?.stacks ?? { one: ["alpha", "beta"], two: ["gamma"] },
     disabledStacks: overrides?.disabledStacks ?? [],

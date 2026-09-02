@@ -2,12 +2,16 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   computeExcludedSkills,
+  desiredExclusions,
   exclusionPatternFor,
   mergeStacks,
   missingSkillNames,
+  nextDisabledStacks,
   planSkillsSetting,
+  scopeManagedExclusions,
   summarizeStacks,
 } from "../src/core.ts";
+import { skillsOnDisk } from "./helpers.ts";
 
 test("mergeStacks: project stacks add to and override global stacks", () => {
   const merged = mergeStacks(
@@ -29,7 +33,7 @@ test("mergeStacks: no project config leaves global untouched", () => {
 test("missingSkillNames: reports names absent from discovery, per stack", () => {
   const missing = missingSkillNames(
     { alpha: ["real", "ghost"], beta: ["real"] },
-    new Set(["real"]),
+    skillsOnDisk("real"),
   );
   assert.deepEqual(missing, { alpha: ["ghost"] });
 });
@@ -54,8 +58,39 @@ test("computeExcludedSkills: nothing excluded when all stacks enabled", () => {
   assert.equal(excluded.size, 0);
 });
 
-test("exclusionPatternFor: builds a baseDir-relative SKILL.md pattern", () => {
-  assert.equal(exclusionPatternFor("firecrawl-map"), "!skills/firecrawl-map/SKILL.md");
+test("exclusionPatternFor: negates the baseDir-relative SKILL.md path", () => {
+  assert.equal(exclusionPatternFor("skills/firecrawl-map/SKILL.md"), "!skills/firecrawl-map/SKILL.md");
+  assert.equal(exclusionPatternFor("skills/group/nested/SKILL.md"), "!skills/group/nested/SKILL.md");
+});
+
+test("desiredExclusions: patterns for excluded skills that exist on disk, sorted; nested paths kept", () => {
+  const discovered = new Map([
+    ["b", "skills/b/SKILL.md"],
+    ["a", "skills/group/a/SKILL.md"],
+  ]);
+  const patterns = desiredExclusions({ off: ["b", "a", "ghost"] }, ["off"], discovered);
+  assert.deepEqual(patterns, ["!skills/b/SKILL.md", "!skills/group/a/SKILL.md"]);
+});
+
+test("scopeManagedExclusions: keeps patterns for on-disk skills that no visible stack claims", () => {
+  const discovered = skillsOnDisk("visible", "elsewhere");
+  const managed = [
+    "!skills/visible/SKILL.md", // in a stack we can see → rewritable
+    "!skills/elsewhere/SKILL.md", // on disk, in no visible stack → another cwd's project stack
+    "!skills/deleted/SKILL.md", // skill dir gone → clean up
+  ];
+  const scoped = scopeManagedExclusions(managed, { s: ["visible"] }, discovered);
+  assert.deepEqual(scoped.retained, ["!skills/elsewhere/SKILL.md"]);
+  assert.deepEqual(scoped.inScope, ["!skills/visible/SKILL.md", "!skills/deleted/SKILL.md"]);
+});
+
+test("nextDisabledStacks: replaces entries for visible stacks, preserves unseen ones, sorted + deduped", () => {
+  const next = nextDisabledStacks(
+    ["zeta-project-only", "seen-off", "seen-deleted"],
+    ["seen-off", "seen-deleted", "seen-on"],
+    ["seen-on", "seen-on"],
+  );
+  assert.deepEqual(next, ["seen-on", "zeta-project-only"]);
 });
 
 test("planSkillsSetting: removes only managed entries, keeps user-written ones", () => {
@@ -91,7 +126,7 @@ test("summarizeStacks: counts stacks, active skills, and names disabled stacks",
   const summary = summarizeStacks(
     { on: ["a", "b"], off: ["c", "d"] },
     ["off"],
-    new Set(["a", "b", "c", "d", "unlisted"]),
+    skillsOnDisk("a", "b", "c", "d", "unlisted"),
   );
   assert.equal(summary.stackCount, 2);
   assert.deepEqual(summary.offStacks, ["off"]);
@@ -105,12 +140,12 @@ test("summarizeStacks: counts stacks, active skills, and names disabled stacks",
 });
 
 test("summarizeStacks: stack sizes count only discovered members", () => {
-  const summary = summarizeStacks({ alpha: ["real", "ghost"] }, [], new Set(["real"]));
+  const summary = summarizeStacks({ alpha: ["real", "ghost"] }, [], skillsOnDisk("real"));
   assert.deepEqual(summary.stacks, [{ name: "alpha", size: 1, enabled: true }]);
 });
 
 test("summarizeStacks: excluded count only covers discovered skills", () => {
-  const summary = summarizeStacks({ off: ["ghost", "real"] }, ["off"], new Set(["real"]));
+  const summary = summarizeStacks({ off: ["ghost", "real"] }, ["off"], skillsOnDisk("real"));
   assert.equal(summary.totalCount, 1);
   assert.equal(summary.activeCount, 0);
 });

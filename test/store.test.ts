@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import {
-  discoverSkillNames,
+  ConfigError,
+  discoverSkills,
+  loadProjectStacks,
   loadStacksConfig,
+  readSettingsSkills,
   saveStacksConfig,
   updateSettingsSkills,
 } from "../src/store.ts";
@@ -13,24 +16,61 @@ import {
 const tmp = mkdtempSync(join(tmpdir(), "skill-stacks-test-"));
 after(() => rmSync(tmp, { recursive: true, force: true }));
 
-test("discoverSkillNames: finds SKILL.md dirs across roots, ignores strays", () => {
-  const rootA = join(tmp, "agents-skills");
-  const rootB = join(tmp, "pi-skills");
-  mkdirSync(join(rootA, "alpha"), { recursive: true });
-  writeFileSync(join(rootA, "alpha", "SKILL.md"), "# a");
-  mkdirSync(join(rootA, "no-skill-file"), { recursive: true });
-  mkdirSync(join(rootB, "beta"), { recursive: true });
-  writeFileSync(join(rootB, "beta", "SKILL.md"), "# b");
-  writeFileSync(join(rootA, "loose-file.md"), "not a skill");
+function skillDir(root: string, ...segments: string[]) {
+  const dir = join(root, ...segments);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "SKILL.md"), "---\ndescription: x\n---\n# skill");
+  return dir;
+}
 
-  const names = discoverSkillNames([rootA, rootB, join(tmp, "missing-root")]);
-  assert.deepEqual([...names].sort(), ["alpha", "beta"]);
+test("discoverSkills: maps names to baseDir-relative SKILL.md paths across roots", () => {
+  const agents = join(tmp, "agents");
+  const agent = join(tmp, "agent");
+  skillDir(agents, "skills", "alpha");
+  mkdirSync(join(agents, "skills", "no-skill-file"), { recursive: true });
+  writeFileSync(join(agents, "skills", "loose-file.md"), "not a skill");
+  skillDir(agent, "skills", "beta");
+
+  const skills = discoverSkills([
+    { dir: join(agents, "skills"), baseDir: agents },
+    { dir: join(agent, "skills"), baseDir: agent },
+    { dir: join(tmp, "missing-root"), baseDir: tmp },
+  ]);
+  assert.deepEqual(
+    [...skills].sort(),
+    [
+      ["alpha", "skills/alpha/SKILL.md"],
+      ["beta", "skills/beta/SKILL.md"],
+    ],
+  );
+});
+
+test("discoverSkills: recurses like pi (nested skills, frontmatter names, skips dot-dirs/node_modules)", () => {
+  const base = join(tmp, "nested");
+  skillDir(base, "skills", "group", "inner");
+  writeFileSync(
+    join(skillDir(base, "skills", "renamed-dir"), "SKILL.md"),
+    '---\nname: "custom-name"\ndescription: x\n---\n',
+  );
+  skillDir(base, "skills", ".hidden", "secret");
+  skillDir(base, "skills", "node_modules", "dep");
+  // a SKILL.md dir is a leaf: skills below it are not discovered
+  skillDir(base, "skills", "group", "inner", "deeper");
+  symlinkSync(join(base, "skills", "group"), join(base, "skills", "linked-group"));
+
+  const skills = discoverSkills([{ dir: join(base, "skills"), baseDir: base }]);
+  assert.deepEqual(
+    [...skills].sort(),
+    [
+      ["custom-name", "skills/renamed-dir/SKILL.md"],
+      ["inner", "skills/group/inner/SKILL.md"],
+    ],
+  );
 });
 
 test("stacks config: load tolerates a missing file, save round-trips", () => {
   const path = join(tmp, "skill-stacks.json");
-  const empty = loadStacksConfig(path);
-  assert.deepEqual(empty, { stacks: {}, disabledStacks: [], managedExclusions: [] });
+  assert.deepEqual(loadStacksConfig(path), { stacks: {}, disabledStacks: [], managedExclusions: [] });
 
   const config = {
     stacks: { alpha: ["a"] },
@@ -41,32 +81,62 @@ test("stacks config: load tolerates a missing file, save round-trips", () => {
   assert.deepEqual(loadStacksConfig(path), config);
 });
 
-test("loadStacksConfig: ignores malformed shapes instead of throwing", () => {
+test("loadStacksConfig: a malformed stack entry fails loud instead of erasing the others", () => {
   const path = join(tmp, "bad-stacks.json");
-  writeFileSync(path, JSON.stringify({ stacks: { alpha: "not-an-array" }, disabledStacks: 42 }));
-  const config = loadStacksConfig(path);
-  assert.deepEqual(config, { stacks: {}, disabledStacks: [], managedExclusions: [] });
+  writeFileSync(path, JSON.stringify({ stacks: { good: ["a"], alpha: "not-an-array" } }));
+  assert.throws(() => loadStacksConfig(path), (error: unknown) => {
+    assert.ok(error instanceof ConfigError);
+    assert.match(error.message, /stack "alpha"/);
+    return true;
+  });
+});
+
+test("loadStacksConfig: malformed disabledStacks and invalid JSON both throw ConfigError", () => {
+  const path = join(tmp, "bad-disabled.json");
+  writeFileSync(path, JSON.stringify({ stacks: {}, disabledStacks: 42 }));
+  assert.throws(() => loadStacksConfig(path), ConfigError);
+  writeFileSync(path, "{ not json");
+  assert.throws(() => loadStacksConfig(path), ConfigError);
 });
 
 test("loadStacksConfig: keeps disabledStacks when stacks is empty (project-only setups)", () => {
   const path = join(tmp, "project-only.json");
-  saveStacksConfig(path, {
+  const config = {
     stacks: {},
     disabledStacks: ["remotion"],
     managedExclusions: ["!skills/remotion/SKILL.md"],
-  });
-  assert.deepEqual(loadStacksConfig(path), {
-    stacks: {},
-    disabledStacks: ["remotion"],
-    managedExclusions: ["!skills/remotion/SKILL.md"],
-  });
+  };
+  saveStacksConfig(path, config);
+  assert.deepEqual(loadStacksConfig(path), config);
 });
 
-test("updateSettingsSkills: rewrites only the skills array, preserves other keys", () => {
+test("loadProjectStacks: absent or empty is undefined, malformed throws", () => {
+  const cwd = join(tmp, "project");
+  mkdirSync(join(cwd, ".pi"), { recursive: true });
+  assert.equal(loadProjectStacks(cwd), undefined);
+  writeFileSync(join(cwd, ".pi", "skill-stacks.json"), JSON.stringify({ stacks: {} }));
+  assert.equal(loadProjectStacks(cwd), undefined);
+  writeFileSync(join(cwd, ".pi", "skill-stacks.json"), JSON.stringify({ stacks: { p: ["x"] } }));
+  assert.deepEqual(loadProjectStacks(cwd), { p: ["x"] });
+  writeFileSync(join(cwd, ".pi", "skill-stacks.json"), JSON.stringify({ stacks: [] }));
+  assert.throws(() => loadProjectStacks(cwd), ConfigError);
+});
+
+test("updateSettingsSkills: rewrites only the skills array, preserves other keys, no trailing newline", () => {
   const path = join(tmp, "settings.json");
   writeFileSync(path, JSON.stringify({ theme: "dark", skills: ["old"] }, null, 2));
   updateSettingsSkills(path, ["!skills/a/SKILL.md"]);
-  const parsed = JSON.parse(readFileSync(path, "utf-8"));
+  const text = readFileSync(path, "utf-8");
+  const parsed = JSON.parse(text);
   assert.equal(parsed.theme, "dark");
   assert.deepEqual(parsed.skills, ["!skills/a/SKILL.md"]);
+  assert.ok(!text.endsWith("\n"));
+});
+
+test("updateSettingsSkills: refuses to overwrite a settings file it cannot parse", () => {
+  const path = join(tmp, "corrupt-settings.json");
+  writeFileSync(path, '{ "theme": "dark", ');
+  assert.throws(() => updateSettingsSkills(path, []), ConfigError);
+  assert.equal(readFileSync(path, "utf-8"), '{ "theme": "dark", ');
+  assert.throws(() => readSettingsSkills(path), ConfigError);
 });

@@ -7,14 +7,14 @@
 // stacks are visible and toggleable but their membership is read-only; edits
 // to them would be shadowed by the project config on the next merge.
 
-import { computeExcludedSkills, type StackMap } from "./core.ts";
+import { computeExcludedSkills, sortNames, type DiscoveredSkills, type StackMap } from "./core.ts";
 
 export type OverlayFocus = "stacks" | "members";
 
 export interface StacksOverlayInit {
   stacks: StackMap;
   disabledStacks: string[];
-  discovered: ReadonlySet<string>;
+  discovered: DiscoveredSkills;
   projectStackNames?: ReadonlySet<string>;
 }
 
@@ -49,12 +49,14 @@ export interface Window<T> {
 export type MembershipChange = "added" | "removed" | "blocked";
 export type DeleteResult = "deleted" | "blocked" | "none";
 
-function sorted(names: Iterable<string>): string[] {
-  return [...names].sort((a, b) => a.localeCompare(b));
-}
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
+/** Scroll offset that keeps `index` inside a window of `rows` starting at `offset`. */
+function followIndex(offset: number, index: number, rows: number) {
+  const visible = Math.max(1, rows);
+  if (index < offset) return index;
+  if (index >= offset + visible) return index - visible + 1;
+  return offset;
 }
 
 export class StacksOverlayModel {
@@ -65,28 +67,25 @@ export class StacksOverlayModel {
   private memberOffset = 0;
   private availableOffset = 0;
 
-  private readonly discovered: ReadonlySet<string>;
+  private readonly discovered: DiscoveredSkills;
   private readonly projectStackNames: ReadonlySet<string>;
   private stackMap: StackMap;
   private names: string[];
   private disabled: Set<string>;
-  private excludedCache: Set<string>;
+  private excluded: Set<string>;
 
   constructor(init: StacksOverlayInit) {
     this.discovered = init.discovered;
     this.projectStackNames = init.projectStackNames ?? new Set();
-    this.stackMap = Object.fromEntries(
-      Object.entries(init.stacks).map(([name, skills]) => [name, [...skills]]),
-    );
-    this.names = Object.keys(this.stackMap).sort((a, b) => a.localeCompare(b));
+    this.stackMap = copyStacks(init.stacks);
+    this.names = sortNames(Object.keys(this.stackMap));
     this.disabled = new Set(init.disabledStacks.filter((name) => this.names.includes(name)));
-    this.excludedCache = computeExcludedSkills(this.stackMap, [...this.disabled]);
-    this.stackIndex = clamp(0, 0, Math.max(0, this.names.length - 1));
+    this.excluded = computeExcludedSkills(this.stackMap, [...this.disabled]);
   }
 
   // ---- state accessors ----
 
-  get stackCount(): number {
+  get stackCount() {
     return this.names.length;
   }
 
@@ -94,82 +93,71 @@ export class StacksOverlayModel {
     return this.names[this.stackIndex];
   }
 
-  stackList(): string[] {
+  /** Discovered skills that are not excluded right now. */
+  get activeSkillCount() {
+    let count = 0;
+    for (const name of this.discovered.keys()) if (!this.excluded.has(name)) count += 1;
+    return count;
+  }
+
+  get discoveredCount() {
+    return this.discovered.size;
+  }
+
+  stackList() {
     return [...this.names];
   }
 
-  isDisabled(name: string): boolean {
+  isDisabled(name: string) {
     return this.disabled.has(name);
   }
 
-  isProjectStack(name: string): boolean {
+  isProjectStack(name: string) {
     return this.projectStackNames.has(name);
   }
 
-  membersOf(name: string): string[] {
-    return sorted(this.stackMap[name] ?? []);
+  membersOf(name: string) {
+    return sortNames(this.stackMap[name] ?? []);
   }
 
   /** Discovered skills not in the given stack, sorted. */
-  availableFor(name: string): string[] {
+  availableFor(name: string) {
     const members = new Set(this.stackMap[name] ?? []);
-    return sorted([...this.discovered].filter((skill) => !members.has(skill)));
+    return sortNames([...this.discovered.keys()].filter((skill) => !members.has(skill)));
   }
 
-  /** Skills currently excluded (in ≥1 stack, no enabled stack). */
-  excludedSkills(): ReadonlySet<string> {
-    return this.excludedCache;
-  }
-
-  isActiveSkill(name: string): boolean {
-    return !this.excludedCache.has(name);
+  isActiveSkill(name: string) {
+    return !this.excluded.has(name);
   }
 
   /** Deep copy for persistence; disabled list sorted for stable config output. */
-  snapshot(): { stacks: StackMap; disabledStacks: string[] } {
-    return {
-      stacks: Object.fromEntries(
-        Object.entries(this.stackMap).map(([name, skills]) => [name, [...skills]]),
-      ),
-      disabledStacks: sorted(this.disabled),
-    };
+  snapshot() {
+    return { stacks: copyStacks(this.stackMap), disabledStacks: sortNames(this.disabled) };
   }
 
   // ---- navigation ----
 
-  setFocus(focus: OverlayFocus): void {
+  setFocus(focus: OverlayFocus) {
     this.focus = focus;
   }
 
-  moveStack(delta: number, rows: number): void {
+  moveStack(delta: number, rows: number) {
     if (this.names.length === 0) return;
     this.stackIndex = clamp(this.stackIndex + delta, 0, this.names.length - 1);
-    const visible = Math.max(1, rows);
-    if (this.stackIndex < this.stackOffset) this.stackOffset = this.stackIndex;
-    if (this.stackIndex >= this.stackOffset + visible) {
-      this.stackOffset = this.stackIndex - visible + 1;
-    }
+    this.stackOffset = followIndex(this.stackOffset, this.stackIndex, rows);
   }
 
   /** Flat movement across the members list then the available list. */
-  moveMember(delta: number, memberRows: number, availableRows: number): void {
+  moveMember(delta: number, memberRows: number, availableRows: number) {
     const total = this.flatMemberCount();
     if (total === 0) return;
     this.memberIndex = clamp(this.memberIndex + delta, 0, total - 1);
     const memberCount = this.selectedMembers.length;
     if (this.memberIndex < memberCount) {
-      const visible = Math.max(1, memberRows);
-      if (this.memberIndex < this.memberOffset) this.memberOffset = this.memberIndex;
-      if (this.memberIndex >= this.memberOffset + visible) {
-        this.memberOffset = this.memberIndex - visible + 1;
-      }
+      this.memberOffset = followIndex(this.memberOffset, this.memberIndex, memberRows);
     } else {
       const index = this.memberIndex - memberCount;
-      const visible = Math.max(1, availableRows);
-      if (index < this.availableOffset) this.availableOffset = index;
-      if (index >= this.availableOffset + visible) {
-        this.availableOffset = index - visible + 1;
-      }
+      this.availableOffset = followIndex(this.availableOffset, index, availableRows);
     }
   }
 
@@ -180,16 +168,18 @@ export class StacksOverlayModel {
     const start = clamp(this.stackOffset, 0, Math.max(0, this.names.length - visible));
     return {
       start,
-      items: this.names.slice(start, start + visible).map((name) => {
-        const members = this.stackMap[name] ?? [];
-        return {
-          name,
-          enabled: !this.disabled.has(name),
-          project: this.projectStackNames.has(name),
-          found: members.filter((skill) => this.discovered.has(skill)).length,
-          total: members.length,
-        };
-      }),
+      items: this.names.slice(start, start + visible).map((name) => this.stackRow(name)),
+    };
+  }
+
+  stackRow(name: string): StackRow {
+    const members = this.stackMap[name] ?? [];
+    return {
+      name,
+      enabled: !this.disabled.has(name),
+      project: this.projectStackNames.has(name),
+      found: members.filter((skill) => this.discovered.has(skill)).length,
+      total: members.length,
     };
   }
 
@@ -214,7 +204,7 @@ export class StacksOverlayModel {
       start,
       items: available.slice(start, start + visible).map((name) => ({
         name,
-        otherStacks: sorted(
+        otherStacks: sortNames(
           Object.entries(this.stackMap)
             .filter(([stack, skills]) => stack !== this.selectedStack && skills.includes(name))
             .map(([stack]) => stack),
@@ -226,12 +216,12 @@ export class StacksOverlayModel {
   // ---- mutations (each leaves the model consistent; caller persists) ----
 
   /** Flip the selected stack on/off. Always changes state. */
-  toggleStack(): boolean {
+  toggleStack() {
     const name = this.selectedStack;
     if (!name) return false;
     if (this.disabled.has(name)) this.disabled.delete(name);
     else this.disabled.add(name);
-    this.excludedCache = computeExcludedSkills(this.stackMap, [...this.disabled]);
+    this.recomputeExcluded();
     return true;
   }
 
@@ -241,8 +231,7 @@ export class StacksOverlayModel {
    */
   toggleMembership(): MembershipChange {
     const stack = this.selectedStack;
-    if (!stack) return "blocked";
-    if (this.projectStackNames.has(stack)) return "blocked";
+    if (!stack || this.projectStackNames.has(stack)) return "blocked";
     const memberCount = this.selectedMembers.length;
     if (this.memberIndex < memberCount) {
       const skill = this.selectedMembers[this.memberIndex]!;
@@ -258,16 +247,14 @@ export class StacksOverlayModel {
   }
 
   /** Create an empty stack and select it. False when the name is taken. */
-  createStack(name: string): boolean {
+  createStack(name: string) {
     const trimmed = name.trim();
     if (!trimmed || trimmed in this.stackMap) return false;
     this.stackMap[trimmed] = [];
-    this.names = Object.keys(this.stackMap).sort((a, b) => a.localeCompare(b));
+    this.names = sortNames(Object.keys(this.stackMap));
     this.stackIndex = this.names.indexOf(trimmed);
-    this.ensureStackVisible(1);
-    this.memberIndex = 0;
-    this.memberOffset = 0;
-    this.availableOffset = 0;
+    this.stackOffset = followIndex(this.stackOffset, this.stackIndex, 1);
+    this.resetMemberCursor();
     return true;
   }
 
@@ -277,42 +264,45 @@ export class StacksOverlayModel {
     if (!name) return "none";
     if (this.projectStackNames.has(name)) return "blocked";
     delete this.stackMap[name];
-    this.names = Object.keys(this.stackMap).sort((a, b) => a.localeCompare(b));
+    this.names = sortNames(Object.keys(this.stackMap));
     this.disabled.delete(name);
     this.stackIndex = clamp(this.stackIndex, 0, Math.max(0, this.names.length - 1));
-    this.memberIndex = 0;
-    this.memberOffset = 0;
-    this.availableOffset = 0;
-    this.excludedCache = computeExcludedSkills(this.stackMap, [...this.disabled]);
+    this.resetMemberCursor();
+    this.recomputeExcluded();
     return "deleted";
   }
 
   // ---- internals ----
 
-  private get selectedMembers(): string[] {
+  private get selectedMembers() {
     const stack = this.selectedStack;
     return stack ? this.membersOf(stack) : [];
   }
 
-  private get selectedAvailable(): string[] {
+  private get selectedAvailable() {
     const stack = this.selectedStack;
     return stack ? this.availableFor(stack) : [];
   }
 
-  private flatMemberCount(): number {
+  private flatMemberCount() {
     return this.selectedMembers.length + this.selectedAvailable.length;
   }
 
-  private afterMembershipChange(): void {
-    this.excludedCache = computeExcludedSkills(this.stackMap, [...this.disabled]);
+  private recomputeExcluded() {
+    this.excluded = computeExcludedSkills(this.stackMap, [...this.disabled]);
+  }
+
+  private afterMembershipChange() {
+    this.recomputeExcluded();
     this.memberIndex = clamp(this.memberIndex, 0, Math.max(0, this.flatMemberCount() - 1));
   }
 
-  private ensureStackVisible(rows: number): void {
-    const visible = Math.max(1, rows);
-    if (this.stackIndex < this.stackOffset) this.stackOffset = this.stackIndex;
-    if (this.stackIndex >= this.stackOffset + visible) {
-      this.stackOffset = this.stackIndex - visible + 1;
-    }
+  private resetMemberCursor() {
+    this.memberIndex = 0;
+    this.memberOffset = 0;
+    this.availableOffset = 0;
   }
 }
+
+const copyStacks = (stacks: StackMap): StackMap =>
+  Object.fromEntries(Object.entries(stacks).map(([name, skills]) => [name, [...skills]]));

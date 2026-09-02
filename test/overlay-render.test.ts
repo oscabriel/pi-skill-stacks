@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { StacksOverlay } from "../extensions/overlay.ts";
+import type { StacksSummary } from "../src/core.ts";
+import { StacksOverlay, type ApplyOutcome, type OverlayResult } from "../extensions/overlay.ts";
+import { skillsOnDisk } from "./helpers.ts";
 
 // Regression guard for the width-cache crash class: every rendered line must
-// fit the width the TUI passes in, at any terminal size.
+// fit the width the TUI passes in, at any terminal size. Lines must also be
+// exactly that wide so the right border stays a straight column.
 
 const fakeTheme = {
   fg: (_color: string, text: string) => `\x1b[38;5;4m${text}\x1b[0m`,
@@ -12,48 +15,68 @@ const fakeTheme = {
   bold: (text: string) => `\x1b[1m${text}\x1b[0m`,
 };
 
-function makeOverlay(rows: number, overrides?: { stacks?: Record<string, string[]> }) {
-  const requests: number[] = [];
+const emptySummary: StacksSummary = {
+  stackCount: 0,
+  offStacks: [],
+  totalCount: 0,
+  activeCount: 0,
+  stacks: [],
+};
+
+const outcome = (settingsChanged: boolean): ApplyOutcome => ({ summary: emptySummary, settingsChanged });
+
+const sampleStacks = {
+  matt: Array.from({ length: 28 }, (_, i) => `skill-${i}`),
+  firecrawl: ["firecrawl-scrape", "ghost-skill", "an-extremely-long-skill-directory-name-here"],
+  remotion: [],
+  "a-very-long-stack-name-that-needs-truncation": ["alpha"],
+};
+
+function makeOverlay(
+  rows: number,
+  overrides?: { stacks?: Record<string, string[]>; settingsChanged?: boolean },
+) {
+  const results: OverlayResult[] = [];
   const overlay = new StacksOverlay(
-    { terminal: { rows }, requestRender: () => requests.push(1) },
+    { terminal: { rows }, requestRender: () => {} },
     fakeTheme,
     {
-      stacks: overrides?.stacks ?? {
-        matt: Array.from({ length: 28 }, (_, i) => `skill-${i}`),
-        firecrawl: ["firecrawl-scrape", "ghost-skill", "an-extremely-long-skill-directory-name-here"],
-        remotion: [],
-        "a-very-long-stack-name-that-needs-truncation": ["alpha"],
-      },
+      stacks: overrides?.stacks ?? sampleStacks,
       disabledStacks: ["remotion"],
-      discovered: new Set(["skill-0", "firecrawl-scrape", "alpha", "beta"]),
+      discovered: skillsOnDisk("skill-0", "firecrawl-scrape", "alpha", "beta"),
       projectStackNames: new Set(["remotion"]),
     },
     {
-      persist: () => ({ summary: {} as never, missing: {}, settingsChanged: false }),
+      persist: () => outcome(overrides?.settingsChanged ?? false),
       notify: () => {},
       input: async () => undefined,
       confirm: async () => false,
-      done: () => {},
+      done: (result) => results.push(result),
     },
   );
-  return { overlay, requests };
+  return { overlay, results };
 }
 
-test("render: no line exceeds the width, across sizes, panes, and focus", () => {
+function assertFramesFit(overlay: StacksOverlay, width: number, label: string) {
+  for (const line of overlay.render(width)) {
+    assert.equal(
+      visibleWidth(line),
+      width,
+      `${label} width=${width}: line is ${visibleWidth(line)} wide: ${JSON.stringify(line)}`,
+    );
+  }
+}
+
+test("render: every line is exactly the width, across sizes, panes, focus, and empty state", () => {
   for (const rows of [10, 24, 40, 80]) {
     for (const width of [40, 50, 76, 100, 160, 200, 300]) {
       const { overlay } = makeOverlay(rows);
-      for (const line of overlay.render(width)) {
-        assert.ok(
-          visibleWidth(line) <= width,
-          `rows=${rows} width=${width}: line ${visibleWidth(line)} > ${width}: ${JSON.stringify(line)}`,
-        );
-      }
-      // members focus renders the other pane layout
-      overlay.handleInput("\t");
-      for (const line of overlay.render(width)) {
-        assert.ok(visibleWidth(line) <= width, `members focus rows=${rows} width=${width}`);
-      }
+      assertFramesFit(overlay, width, `rows=${rows}`);
+      overlay.handleInput("\t"); // members focus renders the other pane layout
+      assertFramesFit(overlay, width, `members focus rows=${rows}`);
+
+      const empty = makeOverlay(rows, { stacks: {} }).overlay;
+      assertFramesFit(empty, width, `no stacks rows=${rows}`);
     }
   }
 });
@@ -66,34 +89,68 @@ test("render: every row count matches the requested body height", () => {
   }
 });
 
-test("handleInput: space toggles a stack and triggers persist via done state", () => {
-  const { overlay } = makeOverlay(40);
-  overlay.handleInput(" "); // disable "matt"
-  // state change is visible on the next render: title shows reload pending
-  const frame = overlay.render(100).join("\n");
-  assert.match(frame, /reload pending/);
+test("render: empty state points at the create key", () => {
+  const { overlay } = makeOverlay(24, { stacks: {} });
+  assert.match(overlay.render(100).join("\n"), /no stacks · n creates one/);
 });
 
-test("handleInput: esc closes with changed flag and outcome", async () => {
-  const results: unknown[] = [];
+test("handleInput: a toggle that rewrote settings shows reload pending", () => {
+  const { overlay } = makeOverlay(40, { settingsChanged: true });
+  overlay.handleInput(" ");
+  assert.match(overlay.render(100).join("\n"), /reload pending/);
+});
+
+test("handleInput: a change that left settings alone does not ask for a reload", () => {
+  const { overlay, results } = makeOverlay(40, { settingsChanged: false });
+  overlay.handleInput(" ");
+  assert.doesNotMatch(overlay.render(100).join("\n"), /reload pending/);
+  overlay.handleInput("\x1b");
+  assert.deepEqual(results, [{ changed: true, settingsDirty: false, outcome: outcome(false) }]);
+});
+
+test("handleInput: settingsDirty sticks once any mutation changed settings", () => {
+  let changed = true;
+  const results: OverlayResult[] = [];
   const overlay = new StacksOverlay(
     { terminal: { rows: 40 }, requestRender: () => {} },
     fakeTheme,
+    { stacks: { one: ["alpha"], two: ["beta"] }, disabledStacks: [], discovered: skillsOnDisk("alpha", "beta") },
     {
-      stacks: { one: ["alpha"] },
-      disabledStacks: [],
-      discovered: new Set(["alpha"]),
-      projectStackNames: new Set(),
-    },
-    {
-      persist: () => ({ summary: {} as never, missing: {}, settingsChanged: true }),
+      persist: () => outcome(changed),
       notify: () => {},
       input: async () => undefined,
       confirm: async () => false,
       done: (result) => results.push(result),
     },
   );
-  overlay.handleInput(" ");
-  overlay.handleInput("\x1b");
-  assert.deepEqual(results, [{ changed: true, outcome: { summary: {}, missing: {}, settingsChanged: true } }]);
+  overlay.handleInput(" "); // settings changed
+  changed = false;
+  overlay.handleInput("j");
+  overlay.handleInput(" "); // this one didn't
+  overlay.handleInput("q");
+  assert.equal(results[0]?.settingsDirty, true);
+  assert.equal(results[0]?.changed, true);
+});
+
+test("handleInput: a rejected dialog reports the error and frees the keyboard", async () => {
+  const notices: string[] = [];
+  const overlay = new StacksOverlay(
+    { terminal: { rows: 40 }, requestRender: () => {} },
+    fakeTheme,
+    { stacks: { one: ["alpha"] }, disabledStacks: [], discovered: skillsOnDisk("alpha") },
+    {
+      persist: () => outcome(false),
+      notify: (message) => notices.push(message),
+      input: async () => {
+        throw new Error("dialog exploded");
+      },
+      confirm: async () => false,
+      done: () => {},
+    },
+  );
+  overlay.handleInput("n");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.match(notices.join("\n"), /dialog exploded/);
+  overlay.handleInput(" "); // would be swallowed if dialogOpen were stuck
+  assert.match(overlay.render(100).join("\n"), /\[ \]/);
 });
