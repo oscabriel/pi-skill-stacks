@@ -331,7 +331,8 @@ export class StacksOverlay {
   }
 
   private renderMemberCell(entry: MemberRow, index: number, width: number) {
-    const selected = index === this.model.memberIndex;
+    const cursor = this.model.memberCursor;
+    const selected = cursor.section === "members" && index === cursor.index;
     const focused = selected && this.model.focus === "members";
     const suffixText = entry.missing ? " missing" : entry.active ? "" : " · excluded";
     const suffix = entry.missing
@@ -345,7 +346,8 @@ export class StacksOverlay {
   }
 
   private renderAvailableCell(entry: AvailableRow, index: number, width: number) {
-    const selected = index === this.model.memberIndex;
+    const cursor = this.model.memberCursor;
+    const selected = cursor.section === "available" && index === cursor.index;
     const focused = selected && this.model.focus === "members";
     const suffixText = entry.otherStacks.length > 0 ? ` · ${entry.otherStacks.join(", ")}` : "";
     const nameWidth = Math.max(1, width - CELL_PREFIX_WIDTH - suffixText.length);

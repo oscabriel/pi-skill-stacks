@@ -41,6 +41,12 @@ export interface AvailableRow {
   otherStacks: string[];
 }
 
+/** Where the flat right-pane cursor sits, as a section plus a list-relative index. */
+export interface MemberCursor {
+  section: "members" | "available";
+  index: number;
+}
+
 export interface Window<T> {
   start: number;
   items: T[];
@@ -102,6 +108,14 @@ export class StacksOverlayModel {
 
   get discoveredCount() {
     return this.discovered.size;
+  }
+
+  /** `memberIndex` is flat across members then available; renderers need it split. */
+  get memberCursor(): MemberCursor {
+    const memberCount = this.selectedMembers.length;
+    return this.memberIndex < memberCount
+      ? { section: "members", index: this.memberIndex }
+      : { section: "available", index: this.memberIndex - memberCount };
   }
 
   stackList() {

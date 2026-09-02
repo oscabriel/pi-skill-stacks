@@ -94,6 +94,36 @@ test("render: empty state points at the create key", () => {
   assert.match(overlay.render(100).join("\n"), /no stacks · n creates one/);
 });
 
+test("render: exactly one cursor and one highlighted row in the right pane, in whichever section holds it", () => {
+  // three members, three available: an available row shares every member row's index
+  const { overlay } = makeOverlay(40, {
+    stacks: { one: ["alpha", "beta", "gamma"] },
+  });
+  overlay.handleInput("\t"); // members focus
+  const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+  const cursorRows = (lines: string[]) =>
+    lines.map(stripAnsi).filter((line) => /│\s*› /.test(line.slice(line.indexOf("│") + 1)));
+  // one highlighted row per pane: the selected stack on the left, the cursor row on the right
+  const highlighted = (lines: string[]) => lines.join("").split("\x1b[48;5;8m").length - 1;
+
+  // cursor on member 1 (beta)
+  overlay.handleInput("j");
+  let lines = overlay.render(100);
+  let cursors = cursorRows(lines);
+  assert.equal(cursors.length, 1, cursors.join("\n"));
+  assert.match(cursors[0]!, /\[x\] beta/);
+  assert.equal(highlighted(lines), 2);
+
+  // cursor into available list, first row
+  overlay.handleInput("j");
+  overlay.handleInput("j");
+  lines = overlay.render(100);
+  cursors = cursorRows(lines);
+  assert.equal(cursors.length, 1, cursors.join("\n"));
+  assert.match(cursors[0]!, /\[ \] /);
+  assert.equal(highlighted(lines), 2);
+});
+
 test("handleInput: a toggle that rewrote settings shows reload pending", () => {
   const { overlay } = makeOverlay(40, { settingsChanged: true });
   overlay.handleInput(" ");

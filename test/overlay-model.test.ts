@@ -144,6 +144,19 @@ test("moveMember clamps at both ends and crosses the members/available boundary"
   assert.equal(model.memberIndex, 3);
 });
 
+test("memberCursor reports the section and list-relative index of the flat cursor", () => {
+  const model = makeModel();
+  model.setFocus("members");
+  // members: alpha, beta; available: delta, gamma
+  assert.deepEqual(model.memberCursor, { section: "members", index: 0 });
+  model.moveMember(1, 10, 10);
+  assert.deepEqual(model.memberCursor, { section: "members", index: 1 });
+  model.moveMember(1, 10, 10);
+  assert.deepEqual(model.memberCursor, { section: "available", index: 0 });
+  model.moveMember(1, 10, 10);
+  assert.deepEqual(model.memberCursor, { section: "available", index: 1 });
+});
+
 test("moveMember scrolls within each section based on the given rows", () => {
   const model = makeModel({
     stacks: { one: ["alpha", "beta", "gamma", "delta"] },
