@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { StacksOverlayModel } from "../src/overlay-model.ts";
+import { splitSectionRows, StacksOverlayModel } from "../src/overlay-model.ts";
 import { skillsOnDisk } from "./helpers.ts";
 
 function makeModel(overrides?: {
@@ -142,6 +142,23 @@ test("moveMember clamps at both ends and crosses the members/available boundary"
   assert.equal(model.memberIndex, 3);
   model.moveMember(1, 10, 10); // clamped, no wrap
   assert.equal(model.memberIndex, 3);
+});
+
+test("splitSectionRows: each section gets what it needs; only when both overflow is the space halved", () => {
+  // both fit: members take their count, available gets the rest
+  assert.deepEqual(splitSectionRows(40, 11, 20), { memberRows: 11, availableRows: 29 });
+  // members small, available huge: available gets everything members don't need
+  assert.deepEqual(splitSectionRows(40, 11, 65), { memberRows: 11, availableRows: 29 });
+  // members huge, available small: mirror image
+  assert.deepEqual(splitSectionRows(40, 65, 11), { memberRows: 29, availableRows: 11 });
+  // both overflow: halve
+  assert.deepEqual(splitSectionRows(40, 65, 65), { memberRows: 20, availableRows: 20 });
+  assert.deepEqual(splitSectionRows(41, 65, 65), { memberRows: 21, availableRows: 20 });
+  // empty members still gets one row for its hint; same for available
+  assert.deepEqual(splitSectionRows(40, 0, 65), { memberRows: 1, availableRows: 39 });
+  assert.deepEqual(splitSectionRows(40, 65, 0), { memberRows: 39, availableRows: 1 });
+  // tiny terminal: never below one row each
+  assert.deepEqual(splitSectionRows(2, 65, 65), { memberRows: 1, availableRows: 1 });
 });
 
 test("memberCursor reports the section and list-relative index of the flat cursor", () => {

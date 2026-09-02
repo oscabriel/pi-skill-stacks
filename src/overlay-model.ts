@@ -65,6 +65,27 @@ function followIndex(offset: number, index: number, rows: number) {
   return offset;
 }
 
+/**
+ * Split `content` rows between the members and available sections. A section
+ * that fits gets exactly the rows it needs (min 1, for its empty-state hint) and
+ * the other takes the rest; only when both overflow is the space halved.
+ */
+export function splitSectionRows(content: number, memberCount: number, availableCount: number) {
+  const total = Math.max(2, content);
+  const memberWant = Math.max(1, memberCount);
+  const availableWant = Math.max(1, availableCount);
+  const half = Math.ceil(total / 2);
+
+  let memberRows: number;
+  if (memberWant + availableWant <= total) memberRows = memberWant;
+  else if (memberWant <= half) memberRows = memberWant;
+  else if (availableWant <= total - half) memberRows = total - availableWant;
+  else memberRows = half;
+
+  memberRows = clamp(memberRows, 1, total - 1);
+  return { memberRows, availableRows: total - memberRows };
+}
+
 export class StacksOverlayModel {
   focus: OverlayFocus = "stacks";
   stackIndex = 0;

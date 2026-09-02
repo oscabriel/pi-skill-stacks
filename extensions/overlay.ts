@@ -19,6 +19,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { StackMap, StacksSummary } from "../src/core.ts";
 import {
+  splitSectionRows,
   StacksOverlayModel,
   type AvailableRow,
   type MemberRow,
@@ -281,11 +282,16 @@ export class StacksOverlay {
     return Math.max(8, Math.floor(this.tui.terminal.rows * 0.8) - 2);
   }
 
-  /** Right-pane layout: 1 stack header + members section + available section (each with a label row). */
+  /**
+   * Right-pane layout: 1 stack header + members section + available section
+   * (each with a label row). Sections are sized to the selected stack's content.
+   */
   private sectionRows() {
     const content = Math.max(2, this.bodyRows() - 1 - 2);
-    const memberRows = Math.max(1, Math.ceil(content / 2));
-    return { memberRows, availableRows: Math.max(1, content - memberRows) };
+    const stack = this.model.selectedStack;
+    const memberCount = stack ? this.model.membersOf(stack).length : 0;
+    const availableCount = stack ? this.model.availableFor(stack).length : 0;
+    return splitSectionRows(content, memberCount, availableCount);
   }
 
   private paneWidths(width: number) {
