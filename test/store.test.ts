@@ -48,6 +48,20 @@ test("loadStacksConfig: ignores malformed shapes instead of throwing", () => {
   assert.deepEqual(config, { stacks: {}, disabledStacks: [], managedExclusions: [] });
 });
 
+test("loadStacksConfig: keeps disabledStacks when stacks is empty (project-only setups)", () => {
+  const path = join(tmp, "project-only.json");
+  saveStacksConfig(path, {
+    stacks: {},
+    disabledStacks: ["remotion"],
+    managedExclusions: ["!skills/remotion/SKILL.md"],
+  });
+  assert.deepEqual(loadStacksConfig(path), {
+    stacks: {},
+    disabledStacks: ["remotion"],
+    managedExclusions: ["!skills/remotion/SKILL.md"],
+  });
+});
+
 test("updateSettingsSkills: rewrites only the skills array, preserves other keys", () => {
   const path = join(tmp, "settings.json");
   writeFileSync(path, JSON.stringify({ theme: "dark", skills: ["old"] }, null, 2));

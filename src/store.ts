@@ -76,9 +76,8 @@ export function loadStacksConfig(path: string = globalConfigPath()): StacksConfi
   const stacks = parseStackMap(record.stacks);
   const disabledStacks = isStringArray(record.disabledStacks) ? record.disabledStacks : [];
   const managedExclusions = isStringArray(record.managedExclusions) ? record.managedExclusions : [];
-  if (Object.keys(stacks).length === 0) {
-    return { stacks: {}, disabledStacks: [], managedExclusions: [] };
-  }
+  // Keep disabledStacks/managedExclusions even when stacks is empty: the user
+  // may run only project-defined stacks, and their on/off state lives here.
   return { stacks, disabledStacks, managedExclusions };
 }
 

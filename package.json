@@ -1,16 +1,33 @@
 {
   "name": "pi-skill-stacks",
-  "version": "0.1.0",
-  "description": "Pi package that groups skills into named stacks you can toggle on/off from a /stacks picker, keeping the system prompt small. Exclusions are written through pi's own settings override mechanism, and a compact [Skills] header line replaces the per-scope listing.",
-  "keywords": ["pi-package", "pi", "extension", "skills", "context", "skill-stacks"],
+  "version": "0.2.0",
+  "description": "Pi package that groups skills into named stacks you can manage from a /stacks overlay — toggle stacks on/off and re-stack skills without editing JSON. Exclusions are written through pi's own settings override mechanism, and a compact [Skills] header line replaces the per-scope listing.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "skills",
+    "context",
+    "skill-stacks"
+  ],
   "license": "MIT",
   "type": "module",
-  "files": ["extensions", "src", "README.md"],
+  "files": [
+    "extensions",
+    "src",
+    "README.md"
+  ],
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
   },
   "pi": {
-    "extensions": ["./extensions/index.ts", "./extensions/header.ts"]
+    "extensions": [
+      "./extensions/index.ts",
+      "./extensions/header.ts"
+    ]
+  },
+  "devDependencies": {
+    "@earendil-works/pi-tui": "^0.84.4"
   }
 }

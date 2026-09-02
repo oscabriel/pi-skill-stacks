@@ -1,16 +1,19 @@
 /**
  * skill-stacks - Toggle named groups of skills on/off for context management.
  *
- * - `/stacks` opens a picker: space flips a stack, enter applies once, esc cancels
+ * - `/stacks` opens a two-pane overlay: toggle stacks on/off, move skills in
+ *   and out of stacks, create/delete stacks. Changes persist immediately;
+ *   pi reloads once when the overlay closes.
  * - `/stacks on <stack>` / `/stacks off <stack>` toggle a single stack
  * - `/stacks list` prints the current state without changing anything
  *
  * Toggling off writes `!skills/<name>/SKILL.md` exclusion patterns into the
  * global settings `skills` array (pi's own override mechanism), so disabled
  * skills vanish from the system prompt, `/skill:` commands, and discovery.
- * Every apply ends with ctx.reload(). The extension only ever removes
- * exclusions it wrote itself (tracked in skill-stacks.json managedExclusions);
- * hand-written `pi config` entries are left alone.
+ * Every persist ends with the caller deciding when to ctx.reload(). The
+ * extension only ever removes exclusions it wrote itself (tracked in
+ * skill-stacks.json managedExclusions); hand-written `pi config` entries are
+ * left alone.
  *
  * Config: global stacks + state in ~/.pi/agent/skill-stacks.json; a project
  * may add/override stack definitions in <cwd>/.pi/skill-stacks.json.
@@ -22,7 +25,6 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import {
   computeExcludedSkills,
   exclusionPatternFor,
@@ -43,34 +45,63 @@ import {
   saveStacksConfig,
   updateSettingsSkills,
 } from "../src/store.ts";
+import { showStacksOverlay, type ApplyOutcome } from "./overlay.ts";
 
 interface StacksView {
   stacks: StackMap;
   stackNames: string[];
   disabledStacks: string[];
   discovered: Set<string>;
+  /** Stack names defined in <cwd>/.pi/skill-stacks.json (membership is read-only in the overlay). */
+  projectStackNames: Set<string>;
 }
 
 function loadView(cwd: string): StacksView {
   const global = loadStacksConfig();
-  const stacks = mergeStacks(global.stacks, loadProjectStacks(cwd));
+  const project = loadProjectStacks(cwd);
+  const stacks = mergeStacks(global.stacks, project);
   const stackNames = Object.keys(stacks).sort((a, b) => a.localeCompare(b));
   const disabledStacks = global.disabledStacks.filter((name) => stackNames.includes(name));
-  return { stacks, stackNames, disabledStacks, discovered: discoverSkillNames() };
+  return {
+    stacks,
+    stackNames,
+    disabledStacks,
+    discovered: discoverSkillNames(),
+    projectStackNames: new Set(Object.keys(project ?? {})),
+  };
 }
 
-interface ApplyOutcome {
-  summary: StacksSummary;
-  missing: Record<string, string[]>;
-  settingsChanged: boolean;
-}
-
-/** Persist a new disabled-stack set: settings.json exclusions + skill-stacks.json state. */
-function applyDisabledStacks(view: StacksView, disabledStacks: string[]): ApplyOutcome {
+/**
+ * Persist a full stacks state: settings.json exclusions + skill-stacks.json.
+ * Takes the MERGED stack map (global + project). Project-defined entries are
+ * written back untouched; everything else comes from the (possibly edited)
+ * merged map. Returns the outcome for notification; the caller decides when
+ * to reload.
+ */
+function persistStacksState(
+  stacks: StackMap,
+  disabledStacks: string[],
+  discovered: ReadonlySet<string>,
+  projectStackNames: ReadonlySet<string>,
+): ApplyOutcome {
   const global = loadStacksConfig();
-  const excluded = computeExcludedSkills(view.stacks, disabledStacks);
+  const globalStacks: StackMap = {};
+  for (const [name, skills] of Object.entries(global.stacks)) {
+    if (projectStackNames.has(name)) {
+      globalStacks[name] = skills; // shadowed by the project; keep as-is
+    } else if (name in stacks) {
+      globalStacks[name] = stacks[name]!; // possibly edited
+    } // else: deleted in the overlay
+  }
+  for (const [name, skills] of Object.entries(stacks)) {
+    if (!projectStackNames.has(name) && !(name in globalStacks)) {
+      globalStacks[name] = skills; // created in the overlay
+    }
+  }
+
+  const excluded = computeExcludedSkills(stacks, disabledStacks);
   const desired = [...excluded]
-    .filter((name) => view.discovered.has(name))
+    .filter((name) => discovered.has(name))
     .sort((a, b) => a.localeCompare(b))
     .map(exclusionPatternFor);
 
@@ -82,14 +113,14 @@ function applyDisabledStacks(view: StacksView, disabledStacks: string[]): ApplyO
     updateSettingsSkills(globalSettingsPath(), plan.skills);
   }
   saveStacksConfig(globalConfigPath(), {
-    stacks: global.stacks,
+    stacks: globalStacks,
     disabledStacks,
     managedExclusions: plan.managed,
   });
 
   return {
-    summary: summarizeStacks(view.stacks, disabledStacks, view.discovered),
-    missing: missingSkillNames(view.stacks, view.discovered),
+    summary: summarizeStacks(stacks, disabledStacks, discovered),
+    missing: missingSkillNames(stacks, discovered),
     settingsChanged,
   };
 }
@@ -104,7 +135,12 @@ async function finishApply(
   view: StacksView,
   disabledStacks: string[],
 ): Promise<void> {
-  const outcome = applyDisabledStacks(view, disabledStacks);
+  const outcome = persistStacksState(view.stacks, disabledStacks, view.discovered, view.projectStackNames);
+  notifyOutcome(ctx, outcome);
+  await ctx.reload();
+}
+
+function notifyOutcome(ctx: ExtensionCommandContext, outcome: ApplyOutcome): void {
   const missingEntries = Object.entries(outcome.missing);
   if (missingEntries.length > 0) {
     const detail = missingEntries
@@ -113,103 +149,20 @@ async function finishApply(
     ctx.ui.notify(`Stacks reference unknown skills (${detail})`, "warning");
   }
   ctx.ui.notify(formatSummary(outcome.summary), "info");
-  await ctx.reload();
 }
 
-async function pickStacks(
-  ctx: ExtensionCommandContext,
-  view: StacksView,
-): Promise<string[] | null> {
-  if (ctx.mode !== "tui") return null;
-
-  return await ctx.ui.custom<string[] | null>((tui, theme, _kb, done) => {
-    let row = 0;
-    const disabled = new Set(view.disabledStacks);
-    let cachedLines: string[] | undefined;
-    let cachedWidth = -1;
-
-    function refresh() {
-      cachedLines = undefined;
-      cachedWidth = -1;
-      tui.requestRender();
-    }
-
-    function handleInput(data: string) {
-      if (matchesKey(data, Key.up)) {
-        row = (row - 1 + view.stackNames.length) % view.stackNames.length;
-        refresh();
-        return;
-      }
-      if (matchesKey(data, Key.down)) {
-        row = (row + 1) % view.stackNames.length;
-        refresh();
-        return;
-      }
-      if (data === " ") {
-        const name = view.stackNames[row];
-        if (disabled.has(name)) disabled.delete(name);
-        else disabled.add(name);
-        refresh();
-        return;
-      }
-      if (matchesKey(data, Key.enter)) {
-        done([...disabled].sort((a, b) => a.localeCompare(b)));
-        return;
-      }
-      if (matchesKey(data, Key.escape)) {
-        done(null);
-      }
-    }
-
-    function render(width: number): string[] {
-      if (cachedLines && cachedWidth === width) return cachedLines;
-      const lines: string[] = [];
-      const add = (s: string) => lines.push(truncateToWidth(s, width));
-
-      const title = " Skill stacks ";
-      add(theme.fg("accent", `─${title}${"─".repeat(Math.max(0, width - title.length - 1))}`));
-      for (let i = 0; i < view.stackNames.length; i += 1) {
-        const name = view.stackNames[i];
-        const members = view.stacks[name] ?? [];
-        const found = members.filter((skill) => view.discovered.has(skill)).length;
-        const off = disabled.has(name);
-        const box = off ? "[ ]" : "[x]";
-        const count =
-          found === members.length ? `${members.length} skills` : `${found}/${members.length} skills`;
-        const prefix = i === row ? theme.fg("accent", " ❯ ") : "   ";
-        const label = `${box} ${name}`;
-        add(
-          prefix +
-            (i === row ? theme.fg("accent", label) : theme.fg(off ? "muted" : "text", label)) +
-            theme.fg("dim", `  ${count}`),
-        );
-      }
-      lines.push("");
-      add(theme.fg("dim", " ↑↓ move · space toggle · enter apply · esc cancel"));
-      add(theme.fg("accent", "─".repeat(width)));
-      cachedLines = lines;
-      cachedWidth = width;
-      return lines;
-    }
-
-    return {
-      render,
-      invalidate: () => {
-        cachedLines = undefined;
-        cachedWidth = -1;
-      },
-      handleInput,
-    };
+function listStacks(view: StacksView): string {
+  const summary = summarizeStacks(view.stacks, view.disabledStacks, view.discovered);
+  const rows = view.stackNames.map((name) => {
+    const state = view.disabledStacks.includes(name) ? "off" : "on";
+    return `${name}: ${state} (${(view.stacks[name] ?? []).length} skills)`;
   });
-}
-
-function sameMembers(a: string[], b: string[]): boolean {
-  return a.length === b.length && a.every((entry) => b.includes(entry));
+  return `${formatSummary(summary)}\n${rows.join("\n")}`;
 }
 
 export default function skillStacks(pi: ExtensionAPI) {
   pi.registerCommand("stacks", {
-    description: "Toggle skill stacks on/off (picker, or: on|off <stack>, list)",
+    description: "Open the stacks overlay (or: on|off <stack>, list)",
     getArgumentCompletions: (prefix: string) => {
       const view = loadView(process.cwd());
       const disabled = new Set(view.disabledStacks);
@@ -242,22 +195,30 @@ export default function skillStacks(pi: ExtensionAPI) {
 
       const trimmed = args.trim();
       if (trimmed === "") {
-        const picked = await pickStacks(ctx, view);
-        if (picked === null || sameMembers(picked, view.disabledStacks)) {
-          ctx.ui.notify("Stacks unchanged", "info");
+        if (ctx.mode !== "tui") {
+          ctx.ui.notify(listStacks(view), "info");
           return;
         }
-        await finishApply(ctx, view, picked);
+        const result = await showStacksOverlay(
+          ctx,
+          {
+            stacks: view.stacks,
+            disabledStacks: view.disabledStacks,
+            discovered: view.discovered,
+            projectStackNames: view.projectStackNames,
+          },
+          (stacks, disabledStacks) =>
+            persistStacksState(stacks, disabledStacks, view.discovered, view.projectStackNames),
+        );
+        if (result.changed && result.outcome) {
+          notifyOutcome(ctx, result.outcome);
+          await ctx.reload();
+        }
         return;
       }
 
       if (trimmed === "list") {
-        const summary = summarizeStacks(view.stacks, view.disabledStacks, view.discovered);
-        const rows = view.stackNames.map((name) => {
-          const state = view.disabledStacks.includes(name) ? "off" : "on";
-          return `${name}: ${state} (${(view.stacks[name] ?? []).length} skills)`;
-        });
-        ctx.ui.notify(`${formatSummary(summary)}\n${rows.join("\n")}`, "info");
+        ctx.ui.notify(listStacks(view), "info");
         return;
       }
 

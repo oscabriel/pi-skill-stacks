@@ -1,10 +1,10 @@
 # pi-skill-stacks
 
-A [pi](https://github.com/earendil-works/pi-mono) package that groups your skills into named stacks you can toggle on and off, so an agent session only pays for the skills it needs. `/stacks` opens a picker; disabled skills vanish from the system prompt, `/skill:` commands, and discovery.
+A [pi](https://github.com/earendil-works/pi-mono) package that groups your skills into named stacks you can toggle on and off, so an agent session only pays for the skills it needs. `/stacks` opens an overlay; disabled skills vanish from the system prompt, `/skill:` commands, and discovery.
 
 ## What it does
 
-- `/stacks` opens an interactive picker: `↑↓` move, `space` toggle, `enter` apply, `esc` cancel. Every apply ends with a reload.
+- `/stacks` opens a two-pane overlay. Left: stacks with on/off state, create (`n`) and delete (`d`). Right: the selected stack's members plus every other discovered skill — `space` moves a skill in or out of the stack, so you can re-stack without editing JSON. Changes persist as you make them; pi reloads once when you close the overlay (`esc`).
 - `/stacks on <stack>` / `/stacks off <stack>` toggle a single stack; `/stacks list` prints state without changing anything.
 - Toggling off writes `!skills/<name>/SKILL.md` exclusion patterns into the global settings `skills` array — pi's own override mechanism — so disabled skills are excluded everywhere, not just from the prompt. The extension only ever removes patterns it wrote itself (tracked in `managedExclusions`); hand-written `pi config` entries are left alone.
 - The bundled header extension replaces pi's startup `[Skills]` listing with a compact line like `matt-pocock (28), firecrawl (28) · 76/76 skills active` (with `off: <name> (n)` segments for disabled stacks) and hides the `[Themes]` section.
@@ -47,7 +47,7 @@ A project can add or override stack definitions in `<project>/.pi/skill-stacks.j
 ## Rules
 
 - **Overlap:** a skill is excluded only when it appears in at least one stack and no enabled stack contains it. Skills in no stack are never touched. So disabling a stack whose members all also belong to an enabled stack excludes nothing.
-- **Apply-once:** picker changes apply when you press enter, followed by a reload. `esc` cancels.
+- **Apply-once:** `on`/`off` commands apply immediately with a reload. In the overlay, every change is written to disk as you make it and a single reload runs when you close it, so the footer shows `reload pending` until then.
 
 ## Header
 
@@ -69,4 +69,4 @@ Your header extension can import `buildSkillsSection` and `isOurSection` from th
 ## Notes
 
 - If a stack references skill names that don't resolve to a discovered skill, `/stacks` warns with the missing names.
-- Counts in the picker and header only include discovered skills, so a stale name doesn't inflate the numbers.
+- Counts in the overlay and header only include discovered skills, so a stale name doesn't inflate the numbers. Missing names are flagged inline.
