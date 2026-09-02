@@ -285,7 +285,7 @@ export class StacksOverlay {
     const help = this.model.viewerOpen
       ? this.hintBar([
           ["↑↓", "scroll"],
-          ["esc", "back"],
+          ["←/esc", "back"],
         ])
       : this.model.focus === "stacks"
         ? this.hintBar([
@@ -300,7 +300,7 @@ export class StacksOverlay {
         : this.hintBar([
             ["↑↓", "move"],
             ["space", "remove"],
-            ["enter", "view"],
+            ["enter/→/tab", "view"],
             ["a", "add skills"],
             ["←/esc", "back"],
           ]);

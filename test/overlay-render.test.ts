@@ -105,7 +105,7 @@ test("render: viewer pane opens to the right of members and every line still fit
     }
     assert.match(lines.join("\n"), /heading/);
     assert.match(lines.join("\n"), /marker/);
-    assert.match(lines.join("\n"), /\[↑↓\] scroll · \[esc\] back/);
+    assert.match(lines.join("\n"), /\[↑↓\] scroll · \[←\/esc\] back/);
   }
 });
 
@@ -240,7 +240,7 @@ test("render: title is compact and the help bar brackets the keys", () => {
   assert.match(help, /\[esc\] close/);
   overlay.handleInput("\t");
   const membersHelp = overlay.render(160).map(stripAnsi).at(-1)!;
-  assert.match(membersHelp, /\[enter\] view/);
+  assert.match(membersHelp, /\[enter\/→\/tab\] view/);
   assert.match(membersHelp, /\[←\/esc\] back/);
 });
 
