@@ -12,6 +12,10 @@
   ],
   "license": "MIT",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oscabriel/pi-skill-stacks.git"
+  },
   "files": [
     "extensions",
     "src",

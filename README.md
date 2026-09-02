@@ -12,6 +12,12 @@ A [pi](https://github.com/earendil-works/pi-mono) package that groups your skill
 ## Install
 
 ```bash
+pi install npm:pi-skill-stacks
+```
+
+or from git:
+
+```bash
 pi install git:github.com/oscabriel/pi-skill-stacks
 ```
 
