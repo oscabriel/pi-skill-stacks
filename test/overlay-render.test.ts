@@ -201,6 +201,35 @@ test("handleInput: →/tab in the viewer are no-ops (viewer is the last pane)", 
   assert.match(overlay.render(100).map(stripAnsi).join("\n"), /\[↑↓\] scroll/);
 });
 
+test("handleInput: mouse wheel scrolls the viewer", () => {
+  const body = Array.from({ length: 60 }, (_, i) => `row ${i}`).join("\n");
+  const { overlay } = makeOverlay(24, {
+    stacks: { one: ["alpha"] },
+    skillContents: new Map([["alpha", body]]),
+  });
+  overlay.handleInput("\t");
+  overlay.handleInput("\r");
+  overlay.handleInput("\x1b[<65;30;12M"); // wheel down
+  let joined = overlay.render(100).map(stripAnsi).join("\n");
+  assert.doesNotMatch(joined, /row 0/);
+  assert.match(joined, /row 1/);
+  overlay.handleInput("\x1b[<64;30;12M"); // wheel up
+  joined = overlay.render(100).map(stripAnsi).join("\n");
+  assert.match(joined, /row 0/);
+  // legacy X10 encoding scrolls too (tmux translates to this sometimes)
+  overlay.handleInput("\x1b[M`##"); // button byte 0x60 = 32+64 → wheel up
+  assert.match(overlay.render(100).map(stripAnsi).join("\n"), /row 0/);
+});
+
+test("handleInput: wheel events outside the viewer are ignored", () => {
+  const { overlay } = makeOverlay(24, { skillContents: new Map([["skill-0", "text"]]) });
+  overlay.handleInput("\x1b[<65;30;12M"); // wheel down in stacks focus
+  assert.match(overlay.render(100).map(stripAnsi).join("\n"), /\[↑↓\] select/);
+  overlay.handleInput("\t");
+  overlay.handleInput("\x1b[<65;30;12M"); // wheel down in members focus
+  assert.match(overlay.render(100).map(stripAnsi).join("\n"), /\[↑↓\] move/);
+});
+
 test("render: title is compact and the help bar brackets the keys", () => {
   const { overlay } = makeOverlay(24);
   const lines = overlay.render(100).map(stripAnsi);

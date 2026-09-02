@@ -72,6 +72,21 @@ const CELL_PREFIX_WIDTH = CURSOR.length + 3 + 1;
 const projectStackNotice = (stack: string) =>
   `"${stack}" is defined in .pi/skill-stacks.json; edit it there`;
 
+/**
+ * Wheel direction from a terminal mouse report: -1 up, +1 down, 0 not a wheel
+ * event. Matches pi-tui's parseWheelEvent — in fullscreen mode pi captures the
+ * mouse and, while an overlay is focused, wheel reports fall through to
+ * handleInput instead of scrolling the transcript.
+ */
+function wheelDirection(data: string): -1 | 0 | 1 {
+  const sgr = /^\x1b\[<(\d+);\d+;\d+[Mm]$/.exec(data);
+  if (!sgr && !(data.length === 6 && data.startsWith("\x1b[M"))) return 0;
+  const button = sgr ? Number(sgr[1]) : data.charCodeAt(3) - 32;
+  if ((button & 64) === 0) return 0;
+  const direction = button & 3;
+  return direction === 0 ? -1 : direction === 1 ? 1 : 0;
+}
+
 export class StacksOverlay {
   private readonly model: StacksOverlayModel;
   private readonly tui: OverlayTui;
@@ -180,6 +195,12 @@ export class StacksOverlay {
   }
 
   private handleViewerInput(data: string) {
+    const wheel = wheelDirection(data);
+    if (wheel !== 0) {
+      this.model.moveViewer(wheel, this.viewerTextWidth(), this.viewerRows());
+      this.tui.requestRender();
+      return;
+    }
     // ←/esc (and enter) return to members; →/tab are no-ops, the viewer is the last pane
     if (
       matchesKey(data, Key.escape) ||

@@ -60,6 +60,8 @@ Navigation is consistent across panes: `←`/`esc` always goes back a pane, `→
 
 The `a`, `n` and `d` dialogs open as small overlays on top of `/stacks`. `a` lists only skills that no stack holds yet. To move a skill between stacks, `space` it out of one and `a` it into the other.
 
+In fullscreen TUI mode the mouse wheel scrolls the skill viewer when the pointer is over the overlay. In regular mode the terminal owns the mouse and wheel input goes to its own scrollback.
+
 `enter` in the members pane opens the skill's full markdown in a viewer pane inside the overlay: frontmatter dim, headings bold, bullets and indented code rendered, links shown as their text.
 
 The title bar shows `reload pending` once a change has touched `settings.json`; the reload runs when you close the overlay.
