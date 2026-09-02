@@ -36,7 +36,7 @@ export interface StacksSummary {
   offStacks: string[];
   totalCount: number;
   activeCount: number;
-  /** Per-stack status in definition order, for the header section body. */
+  /** Per-stack status in definition order. */
   stacks: StackStatus[];
 }
 
@@ -161,7 +161,7 @@ export function nextDisabledStacks(
   return sortNames(new Set([...unseen, ...visibleDisabled]));
 }
 
-/** Counts for the compact `[Skills]` header line. Only discovered skills are counted. */
+/** Stack and active-skill counts. Only discovered skills are counted. */
 export function summarizeStacks(
   stacks: StackMap,
   disabledStacks: string[],

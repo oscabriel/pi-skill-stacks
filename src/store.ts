@@ -246,9 +246,10 @@ export function updateSettingsSkills(path: string, skills: string[]) {
 }
 
 /**
- * Fresh-from-disk summary for the compact `[Skills]` header line.
- * Returns undefined when no stacks are configured (leave pi's section alone).
- * Throws ConfigError on malformed config; the header catches and falls back.
+ * Fresh-from-disk stacks summary for external consumers (e.g. a user's own
+ * header extension). Not used by the package itself.
+ * Returns undefined when no stacks are configured. Throws ConfigError on
+ * malformed config; callers decide whether to fall back.
  */
 export function loadStacksSummary(cwd: string) {
   const global = loadStacksConfig();

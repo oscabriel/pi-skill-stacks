@@ -7,7 +7,7 @@ A [pi](https://github.com/earendil-works/pi-mono) package that groups your skill
 - `/stacks` opens a two-pane overlay. Left: stacks with on/off state, create (`n`), delete (`d`), and `a` to add skills that aren't in any stack yet. Right: the selected stack's members; `space` removes one, `enter` opens the skill's full markdown in a viewer pane. So you can build and edit stacks without touching JSON. Changes persist as you make them; pi reloads once when you close the overlay, and only if a toggle actually changed `settings.json`.
 - `/stacks on <stack>` / `/stacks off <stack>` toggle a single stack (with argument completion); `/stacks list` prints state without changing anything. Bare `/stacks` outside the TUI (RPC/print mode) prints the list too.
 - Toggling off writes `!skills/<dir>/SKILL.md` exclusion patterns into the global settings `skills` array — pi's own override mechanism — so disabled skills are excluded everywhere, not just from the prompt. The extension only ever removes patterns it wrote itself (tracked in `managedExclusions`); hand-written `pi config` entries are left alone.
-- The bundled header extension replaces pi's startup `[Skills]` listing with a compact line like `matt-pocock (28), firecrawl (28) · 76/76 skills active` (with `off: <name> (n)` segments for disabled stacks) and hides the `[Themes]` section.
+- Nothing else. The package doesn't touch pi's header or startup listing; if you want a compact stacks line up there, see [Summary data for your own header](#summary-data-for-your-own-header).
 
 ## Install
 
@@ -76,30 +76,28 @@ The title bar shows `reload pending` once a change has touched `settings.json`; 
 
 - **Overlap:** a skill is excluded only when it appears in at least one stack and no enabled stack contains it. Skills in no stack are never touched. So disabling a stack whose members all also belong to an enabled stack excludes nothing.
 - **Stacks, not skills:** `on`/`off` take stack names only. To exclude a single skill regardless of stacks, use `pi config` (its `!` entries are respected and never claimed).
-- **Persist-then-reload:** `on`/`off` commands write immediately and reload if `settings.json` changed. In the overlay every change is written as you make it and a single reload runs on close, again only if `settings.json` changed; re-stacking alone doesn't need one (the header line catches up on the next reload).
+- **Persist-then-reload:** `on`/`off` commands write immediately and reload if `settings.json` changed. In the overlay every change is written as you make it and a single reload runs on close, again only if `settings.json` changed; re-stacking alone doesn't need one.
 - **Other projects' stacks:** a project stack you disabled from inside its project stays disabled when you toggle things elsewhere. Its `disabledStacks` entry and the exclusions written for its skills are preserved, because from another directory those skills are "in no stack" and so left alone.
 
-## Header
+## Summary data for your own header
 
-The header extension swaps pi's full skills listing for a compact summary and hides `[Themes]`. It also replaces the stock header banner with a minimal one-line directory label. If you run your own header extension (custom art, dashboard, and so on), disable this one and keep yours — add a filter to the package entry in `settings.json`:
+The package never calls `ctx.ui.setHeader` or edits pi's startup sections. If your own header extension wants to show stacks (say, `matt-pocock (28), firecrawl (28) · 76/76 skills active` in place of pi's full `[Skills]` listing), read the data from `src/store.ts`:
 
-```json
-{
-  "packages": [
-    {
-      "source": "git:github.com/oscabriel/pi-skill-stacks",
-      "extensions": ["!extensions/header.ts"]
-    }
-  ]
-}
+```ts
+import { loadStacksSummary } from "<install path>/pi-skill-stacks/src/store.ts";
+
+const summary = loadStacksSummary(process.cwd());
+// undefined when no stacks are configured; throws ConfigError on a malformed file
+// summary.stacks: [{ name, size, enabled }], in definition order
+// summary.activeCount / summary.totalCount: discovered skills, after exclusions
 ```
 
-Your header extension can import the section machinery from this package's `extensions/header.ts` to render the same compact line itself: `buildSkillsSection(cwd, theme)` builds the node, `replaceSkillsSection(root, node)` and `hideThemesSection(root)` splice pi's sections, `isOurSection`, `firstLineOf`, and `renderedText` are the matchers, and `SectionTheme`/`RenderableNode` are the structural types they take.
+For an npm install, `<install path>` is `~/.pi/agent/npm/node_modules`. It reads fresh from disk on every call, so a `/reload` picks up changes made in `/stacks`.
 
 ## Notes
 
 - If a stack references skill names that don't resolve to a discovered skill, every `/stacks` invocation warns with the missing names, and the overlay flags them inline as `missing`.
-- Counts in the overlay and header only include discovered skills, so a stale name doesn't inflate the numbers.
+- Counts in the overlay and in `loadStacksSummary` only include discovered skills, so a stale name doesn't inflate the numbers.
 - `settings.json` is rewritten without a trailing newline to match pi's own formatting; `skill-stacks.json` ends with one.
 
 ## Develop

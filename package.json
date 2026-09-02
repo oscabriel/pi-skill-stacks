@@ -1,7 +1,7 @@
 {
   "name": "pi-skill-stacks",
   "version": "0.4.2",
-  "description": "Pi package that groups skills into named stacks you can manage from a /stacks overlay — toggle stacks on/off and re-stack skills without editing JSON. Exclusions are written through pi's own settings override mechanism, and a compact [Skills] header line replaces the per-scope listing.",
+  "description": "Pi package that groups skills into named stacks you can manage from a /stacks overlay — toggle stacks on/off and re-stack skills without editing JSON. Exclusions are written through pi's own settings override mechanism.",
   "keywords": [
     "pi-package",
     "pi",
@@ -27,8 +27,7 @@
   },
   "pi": {
     "extensions": [
-      "./extensions/index.ts",
-      "./extensions/header.ts"
+      "./extensions/index.ts"
     ]
   },
   "devDependencies": {
