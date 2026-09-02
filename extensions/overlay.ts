@@ -285,13 +285,13 @@ export class StacksOverlay {
     const help = this.model.viewerOpen
       ? this.hintBar([
           ["↑↓", "scroll"],
-          ["←/esc", "back"],
+          ["←", "back"],
         ])
       : this.model.focus === "stacks"
         ? this.hintBar([
             ["↑↓", "select"],
             ["space", "on/off"],
-            ["→/tab", "members"],
+            ["→", "members"],
             ["a", "add skills"],
             ["n", "new stack"],
             ["d", "delete"],
@@ -300,9 +300,8 @@ export class StacksOverlay {
         : this.hintBar([
             ["↑↓", "move"],
             ["space", "remove"],
-            ["enter/→/tab", "view"],
+            ["←/→", "back/view"],
             ["a", "add skills"],
-            ["←/esc", "back"],
           ]);
     lines.push(this.border(width, help, false));
     return lines;

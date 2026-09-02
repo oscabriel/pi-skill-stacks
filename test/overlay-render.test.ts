@@ -105,7 +105,7 @@ test("render: viewer pane opens to the right of members and every line still fit
     }
     assert.match(lines.join("\n"), /heading/);
     assert.match(lines.join("\n"), /marker/);
-    assert.match(lines.join("\n"), /\[↑↓\] scroll · \[←\/esc\] back/);
+    assert.match(lines.join("\n"), /\[↑↓\] scroll · \[←\] back/);
   }
 });
 
@@ -236,12 +236,12 @@ test("render: title is compact and the help bar brackets the keys", () => {
   assert.match(lines[0]!, /skill stacks \(4\) · \d+\/\d+ active/);
   // full help bar needs width; frameEdge truncates it on narrow terminals
   const help = overlay.render(160).map(stripAnsi).at(-1)!;
-  assert.match(help, /\[space\] on\/off · \[→\/tab\] members/);
+  assert.match(help, /\[space\] on\/off · \[→\] members/);
   assert.match(help, /\[esc\] close/);
   overlay.handleInput("\t");
   const membersHelp = overlay.render(160).map(stripAnsi).at(-1)!;
-  assert.match(membersHelp, /\[enter\/→\/tab\] view/);
-  assert.match(membersHelp, /\[←\/esc\] back/);
+  assert.match(membersHelp, /\[←\/→\] back\/view/);
+  assert.doesNotMatch(membersHelp, /esc|tab|enter/);
 });
 
 test("render: every row count matches the requested body height", () => {
