@@ -9,14 +9,16 @@
 // be smoke-tested without a live pi session; showStacksOverlay wires it into
 // the TUI.
 
-import type { ExtensionCommandContext, ThemeColor } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
   Key,
   matchesKey,
-  type OverlayHandle,
+  type OverlayOptions,
   truncateToWidth,
   visibleWidth,
 } from "@earendil-works/pi-tui";
+import { ConfirmDialog, PromptDialog } from "./dialogs.ts";
+import { frameEdge, type OverlayTheme, padToWidth } from "./frame.ts";
 import type { StackMap, StacksSummary } from "../src/core.ts";
 import {
   splitSectionRows,
@@ -53,16 +55,12 @@ export interface StacksOverlayCallbacks {
   done: (result: OverlayResult) => void;
 }
 
-/** Minimal slices of pi-tui's TUI and Theme the overlay touches (kept small so tests can fake them). */
+export type { OverlayTheme } from "./frame.ts";
+
+/** Minimal slice of pi-tui's TUI the overlay touches (kept small so tests can fake it). */
 export interface OverlayTui {
   terminal: { rows: number };
   requestRender(): void;
-}
-
-export interface OverlayTheme {
-  fg(color: ThemeColor, text: string): string;
-  bg(color: "selectedBg" | "customMessageBg", text: string): string;
-  bold(text: string): string;
 }
 
 const CURSOR = "› ";
@@ -213,7 +211,7 @@ export class StacksOverlay {
       }
 
       const mid = this.theme.fg(this.model.focus === "members" ? "borderAccent" : "borderMuted", "│");
-      const edge = this.theme.fg("borderMuted", "│");
+      const edge = this.theme.fg("borderAccent", "│");
       lines.push(`${edge}${left}${mid}${right}${edge}`);
     }
 
@@ -300,14 +298,7 @@ export class StacksOverlay {
   }
 
   private border(width: number, label: string, top: boolean) {
-    const left = top ? "┌" : "└";
-    const right = top ? "┐" : "┘";
-    const text = `─ ${label} `;
-    const remaining = Math.max(0, width - visibleWidth(text) - 2);
-    return this.theme.fg(
-      "borderAccent",
-      truncateToWidth(`${left}${text}${"─".repeat(remaining)}${right}`, width, ""),
-    );
+    return frameEdge(this.theme, width, label, top);
   }
 
   private renderStackHeader(stack: string, width: number) {
@@ -372,11 +363,6 @@ export class StacksOverlay {
   }
 }
 
-function padToWidth(text: string, width: number) {
-  const truncated = truncateToWidth(text, width, "");
-  return `${truncated}${" ".repeat(Math.max(0, width - visibleWidth(truncated)))}`;
-}
-
 export async function showStacksOverlay(
   ctx: ExtensionCommandContext,
   init: StacksOverlayInit,
@@ -384,17 +370,11 @@ export async function showStacksOverlay(
 ): Promise<OverlayResult> {
   if (ctx.mode !== "tui") return { changed: false, settingsDirty: false, outcome: null };
 
-  // ctx.ui.input/confirm render in the main layout, underneath a visible overlay.
-  // The overlay keeps input ownership back afterwards, but nothing moves it out of
-  // the way, so hide it for the dialog's lifetime.
-  let handle: OverlayHandle | undefined;
-  const behindOverlay = async <T>(dialog: () => Promise<T>) => {
-    handle?.setHidden(true);
-    try {
-      return await dialog();
-    } finally {
-      handle?.setHidden(false);
-    }
+  // pi's ctx.ui.input/confirm render in the main layout, underneath a visible
+  // overlay. Our dialogs are overlays themselves so they stack on top of /stacks.
+  const dialogOptions = {
+    overlay: true,
+    overlayOptions: { anchor: "center", width: 60, minWidth: 44 } satisfies OverlayOptions,
   };
 
   return await ctx.ui.custom<OverlayResult>(
@@ -402,15 +382,20 @@ export async function showStacksOverlay(
       new StacksOverlay(tui, theme, init, {
         persist,
         notify: (message, type) => ctx.ui.notify(message, type),
-        input: (title, placeholder) => behindOverlay(() => ctx.ui.input(title, placeholder)),
-        confirm: (title, message) => behindOverlay(() => ctx.ui.confirm(title, message)),
+        input: (title, placeholder) =>
+          ctx.ui.custom<string | undefined>(
+            (_tui, theme, _kb, done) => new PromptDialog(theme, title, placeholder, done),
+            dialogOptions,
+          ),
+        confirm: (title, message) =>
+          ctx.ui.custom<boolean>(
+            (_tui, theme, _kb, done) => new ConfirmDialog(theme, title, message, done),
+            dialogOptions,
+          ),
         done,
       }),
     {
       overlay: true,
-      onHandle: (h) => {
-        handle = h;
-      },
       overlayOptions: {
         anchor: "center",
         width: "90%",

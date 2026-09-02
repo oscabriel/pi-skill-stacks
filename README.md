@@ -52,6 +52,9 @@ The config file is validated on every load. A malformed entry (a stack that isn'
 | --- | --- |
 | stacks | `↑`/`↓` (or `k`/`j`) select · `space` on/off · `→`/`l`/`tab`/`enter` into members · `n` new stack · `d` delete · `esc`/`q` close |
 | members | `↑`/`↓` (or `k`/`j`) move · `space` add/remove the skill · `←`/`h`/`tab`/`esc` back to stacks |
+| new stack / delete dialogs | `enter` confirm · `esc` cancel |
+
+The right pane is one list: the cursor walks down the stack's members and continues into the available skills. Each section takes the rows it needs; when both overflow, the space is split in half. The `n` and `d` dialogs open as small overlays on top of `/stacks`.
 
 The title bar shows `reload pending` once a change has touched `settings.json`; the reload runs when you close the overlay.
 
