@@ -10,7 +10,13 @@
 // the TUI.
 
 import type { ExtensionCommandContext, ThemeColor } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+  Key,
+  matchesKey,
+  type OverlayHandle,
+  truncateToWidth,
+  visibleWidth,
+} from "@earendil-works/pi-tui";
 import type { StackMap, StacksSummary } from "../src/core.ts";
 import {
   StacksOverlayModel,
@@ -372,17 +378,33 @@ export async function showStacksOverlay(
 ): Promise<OverlayResult> {
   if (ctx.mode !== "tui") return { changed: false, settingsDirty: false, outcome: null };
 
+  // ctx.ui.input/confirm render in the main layout, underneath a visible overlay.
+  // The overlay keeps input ownership back afterwards, but nothing moves it out of
+  // the way, so hide it for the dialog's lifetime.
+  let handle: OverlayHandle | undefined;
+  const behindOverlay = async <T>(dialog: () => Promise<T>) => {
+    handle?.setHidden(true);
+    try {
+      return await dialog();
+    } finally {
+      handle?.setHidden(false);
+    }
+  };
+
   return await ctx.ui.custom<OverlayResult>(
     (tui, theme, _kb, done) =>
       new StacksOverlay(tui, theme, init, {
         persist,
         notify: (message, type) => ctx.ui.notify(message, type),
-        input: (title, placeholder) => ctx.ui.input(title, placeholder),
-        confirm: (title, message) => ctx.ui.confirm(title, message),
+        input: (title, placeholder) => behindOverlay(() => ctx.ui.input(title, placeholder)),
+        confirm: (title, message) => behindOverlay(() => ctx.ui.confirm(title, message)),
         done,
       }),
     {
       overlay: true,
+      onHandle: (h) => {
+        handle = h;
+      },
       overlayOptions: {
         anchor: "center",
         width: "90%",
