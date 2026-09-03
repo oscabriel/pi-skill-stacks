@@ -19,8 +19,10 @@ import {
   visibleWidth,
 } from "@earendil-works/pi-tui";
 import { ConfirmDialog, PickDialog, PromptDialog } from "./dialogs.ts";
-import { frameEdge, type OverlayTheme, padToWidth } from "./frame.ts";
+import { frameEdge, type OverlayTheme, padToWidth, wrapText } from "./frame.ts";
+import { homedir } from "node:os";
 import type { StackMap, StacksSummary } from "../src/core.ts";
+import { defaultSkillRoots } from "../src/store.ts";
 import {
   StacksOverlayModel,
   type MemberRow,
@@ -71,6 +73,24 @@ const CELL_PREFIX_WIDTH = CURSOR.length + 3 + 1;
 
 const projectStackNotice = (stack: string) =>
   `"${stack}" is defined in .pi/skill-stacks.json; edit it there`;
+
+/** The directories skills are discovered from, with $HOME shortened to `~`. */
+function skillRootsNotice() {
+  const home = homedir();
+  const shown = defaultSkillRoots().map(({ dir }) => (dir.startsWith(home) ? `~${dir.slice(home.length)}` : dir));
+  return `No skills discovered (looked in ${shown.join(" and ")})`;
+}
+
+// Paragraphs only — wrapText reflows each to the members pane's width.
+const EMPTY_INTRO = [
+  "No stacks yet",
+  "",
+  "A stack is a named group of skills you can switch on and off together. Skills that are off leave the system prompt, /skill: commands, and discovery.",
+  "",
+  "Press n (or enter) to create one. You'll pick its skills right after.",
+  "",
+  "Later, a adds skills to the selected stack and space switches it on or off.",
+].join("\n");
 
 /**
  * Wheel direction from a terminal mouse report: -1 up, +1 down, 0 not a wheel
@@ -141,9 +161,14 @@ export class StacksOverlay {
       matchesKey(data, Key.tab) ||
       data === "l"
     ) {
-      this.model.setFocus("members");
-      this.model.moveMember(0, this.memberRows());
-      this.tui.requestRender();
+      if (this.model.stackCount === 0) {
+        // first-run shortcut: enter on an empty list starts the create flow
+        this.openNewStackDialog();
+      } else {
+        this.model.setFocus("members");
+        this.model.moveMember(0, this.memberRows());
+        this.tui.requestRender();
+      }
     } else if (data === "n") {
       this.openNewStackDialog();
     } else if (data === "d") {
@@ -247,7 +272,15 @@ export class StacksOverlay {
 
       let members: string;
       if (!stack) {
-        members = row === 0 ? hint(" no stacks · n creates one", membersW) : blank(membersW);
+        const intro = wrapText(EMPTY_INTRO, Math.max(10, membersW - 1));
+        const text = intro[row];
+        if (text === undefined) {
+          members = blank(membersW);
+        } else if (row === 0) {
+          members = padToWidth(this.theme.fg("accent", this.theme.bold(` ${text}`)), membersW);
+        } else {
+          members = padToWidth(this.theme.fg("text", ` ${text}`), membersW);
+        }
       } else if (row === 0) {
         members = this.renderStackHeader(stack, membersW);
       } else if (row === 1) {
@@ -287,22 +320,27 @@ export class StacksOverlay {
           ["↑↓", "scroll"],
           ["←", "back"],
         ])
-      : this.model.focus === "stacks"
+      : this.model.stackCount === 0
         ? this.hintBar([
-            ["↑↓", "select"],
-            ["space", "on/off"],
-            ["→", "members"],
-            ["a", "add skills"],
-            ["n", "new stack"],
-            ["d", "delete"],
+            ["n/enter", "new stack"],
             ["esc", "close"],
           ])
-        : this.hintBar([
-            ["↑↓", "move"],
-            ["space", "remove"],
-            ["←/→", "back/view"],
-            ["a", "add skills"],
-          ]);
+        : this.model.focus === "stacks"
+          ? this.hintBar([
+              ["↑↓", "select"],
+              ["space", "on/off"],
+              ["→", "members"],
+              ["a", "add skills"],
+              ["n", "new stack"],
+              ["d", "delete"],
+              ["esc", "close"],
+            ])
+          : this.hintBar([
+              ["↑↓", "move"],
+              ["space", "remove"],
+              ["←/→", "back/view"],
+              ["a", "add skills"],
+            ]);
     lines.push(this.border(width, help, false));
     return lines;
   }
@@ -333,6 +371,7 @@ export class StacksOverlay {
 
   private openNewStackDialog() {
     void this.withDialog(async () => {
+      const wasEmpty = this.model.stackCount === 0;
       const name = (await this.callbacks.input("New stack name", "e.g. writing"))?.trim();
       if (!name) return;
       if (!this.model.createStack(name)) {
@@ -340,7 +379,28 @@ export class StacksOverlay {
         return;
       }
       this.apply();
+      if (wasEmpty) await this.pickSkillsForSelectedStack();
     });
+  }
+
+  /** The add-skills picker for the selected stack, shared by `a` and the first-run create flow. */
+  private async pickSkillsForSelectedStack() {
+    const name = this.model.selectedStack;
+    if (!name) return;
+    if (this.model.isProjectStack(name)) {
+      this.callbacks.notify(projectStackNotice(name), "warning");
+      return;
+    }
+    const unstacked = this.model.unstackedSkills();
+    if (unstacked.length === 0) {
+      this.callbacks.notify(
+        this.model.discoveredCount === 0 ? skillRootsNotice() : "Every discovered skill is already in a stack",
+        "info",
+      );
+      return;
+    }
+    const picked = await this.callbacks.pick(`Add to ${name} · ${unstacked.length} unstacked`, unstacked);
+    if (picked && this.model.addSkills(picked) === "added") this.apply();
   }
 
   private openDeleteDialog() {
@@ -362,21 +422,8 @@ export class StacksOverlay {
 
   /** `a`: pick from the skills no stack holds yet and add them to the selected stack. */
   private openAddDialog() {
-    const name = this.model.selectedStack;
-    if (!name) return;
-    if (this.model.isProjectStack(name)) {
-      this.callbacks.notify(projectStackNotice(name), "warning");
-      return;
-    }
-    const unstacked = this.model.unstackedSkills();
-    if (unstacked.length === 0) {
-      this.callbacks.notify("Every discovered skill is already in a stack", "info");
-      return;
-    }
-    void this.withDialog(async () => {
-      const picked = await this.callbacks.pick(`Add to ${name} · ${unstacked.length} unstacked`, unstacked);
-      if (picked && this.model.addSkills(picked) === "added") this.apply();
-    });
+    if (!this.model.selectedStack) return;
+    void this.withDialog(() => this.pickSkillsForSelectedStack());
   }
 
   private bodyRows() {

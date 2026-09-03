@@ -20,6 +20,7 @@ const emptySummary: StacksSummary = {
   offStacks: [],
   totalCount: 0,
   activeCount: 0,
+  unstackedCount: 0,
   stacks: [],
 };
 
@@ -252,9 +253,14 @@ test("render: every row count matches the requested body height", () => {
   }
 });
 
-test("render: empty state points at the create key", () => {
+test("render: empty state shows a first-run intro pointing at the create key", () => {
   const { overlay } = makeOverlay(24, { stacks: {} });
-  assert.match(overlay.render(100).join("\n"), /no stacks · n creates one/);
+  const rendered = overlay.render(100).map(stripAnsi).join("\n");
+  assert.match(rendered, /No stacks yet/);
+  assert.match(rendered, /Press n \(or enter\) to create one/);
+  assert.doesNotMatch(rendered, /then a to pick/);
+  assert.match(rendered, /\[n\/enter\] new stack · \[esc\] close/);
+  assert.doesNotMatch(rendered, /\[space\] on\/off/);
 });
 
 test("render: exactly one cursor and one highlighted row in the right pane", () => {
@@ -391,4 +397,109 @@ test("handleInput: `a` offers only unstacked skills and adds what was picked", a
   await tick();
   assert.equal(offered.length, 1);
   assert.match(notices.at(-1)!, /\.pi\/skill-stacks\.json/);
+});
+
+test("handleInput: first run — enter creates a stack and chains into the add picker", async () => {
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const inputTitles: string[] = [];
+  const pickTitles: string[] = [];
+  const offered: string[] = [];
+  const persisted: Record<string, string[]>[] = [];
+  const overlay = new StacksOverlay(
+    { terminal: { rows: 40 }, requestRender: () => {} },
+    fakeTheme,
+    { stacks: {}, disabledStacks: [], discovered: skillsOnDisk("alpha", "beta") },
+    {
+      persist: (stacks) => {
+        persisted.push(JSON.parse(JSON.stringify(stacks)));
+        return outcome(false);
+      },
+      notify: () => {},
+      input: async (title) => {
+        inputTitles.push(title);
+        return "writing";
+      },
+      confirm: async () => false,
+      pick: async (title, items) => {
+        pickTitles.push(title);
+        offered.push(...items);
+        return ["alpha"];
+      },
+      done: () => {},
+    },
+  );
+
+  overlay.handleInput("\r"); // enter on the empty stacks list
+  await tick();
+  assert.deepEqual(inputTitles, ["New stack name"]);
+  assert.deepEqual(pickTitles, ["Add to writing · 2 unstacked"]);
+  assert.deepEqual(offered, ["alpha", "beta"]);
+  assert.deepEqual(persisted.at(-1)?.writing, ["alpha"]);
+});
+
+test("handleInput: first run — a cancelled name prompt creates nothing", async () => {
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+  let picks = 0;
+  let persisted = 0;
+  const overlay = new StacksOverlay(
+    { terminal: { rows: 40 }, requestRender: () => {} },
+    fakeTheme,
+    { stacks: {}, disabledStacks: [], discovered: skillsOnDisk("alpha") },
+    {
+      persist: () => {
+        persisted += 1;
+        return outcome(false);
+      },
+      notify: () => {},
+      input: async () => undefined,
+      confirm: async () => false,
+      pick: async () => {
+        picks += 1;
+        return undefined;
+      },
+      done: () => {},
+    },
+  );
+
+  overlay.handleInput("\r");
+  await tick();
+  assert.equal(picks, 0);
+  assert.equal(persisted, 0);
+});
+
+test("handleInput: first run with no skills on disk says so instead of offering a picker", async () => {
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const notices: string[] = [];
+  let picks = 0;
+  const overlay = new StacksOverlay(
+    { terminal: { rows: 40 }, requestRender: () => {} },
+    fakeTheme,
+    { stacks: {}, disabledStacks: [], discovered: skillsOnDisk() },
+    {
+      persist: () => outcome(false),
+      notify: (message) => notices.push(message),
+      input: async () => "writing",
+      confirm: async () => false,
+      pick: async () => {
+        picks += 1;
+        return undefined;
+      },
+      done: () => {},
+    },
+  );
+
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = "/tmp/pi-skill-stacks-test-agent";
+  try {
+    overlay.handleInput("n");
+    await tick();
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+  }
+  assert.equal(picks, 0);
+  const notice = notices.join("\n");
+  assert.match(notice, /No skills discovered/);
+  assert.match(notice, /~\/\.agents\/skills/);
+  assert.match(notice, /\/tmp\/pi-skill-stacks-test-agent\/skills/);
 });

@@ -69,7 +69,7 @@ test("PickDialog renders every line at exactly the requested width, at any list 
       const pick = new PickDialog(fakeTheme, "Add to writing", items.slice(0, count), () => {});
       assertExactWidth(pick.render(width), width, `pick n=${count}`);
       pick.handleInput(" ");
-      pick.handleInput("j");
+      pick.handleInput("\x1b[B");
       assertExactWidth(pick.render(width), width, `pick marked n=${count}`);
     }
   }
@@ -78,9 +78,9 @@ test("PickDialog renders every line at exactly the requested width, at any list 
 test("PickDialog: caps visible rows and scrolls the cursor into view", () => {
   const pick = new PickDialog(fakeTheme, "Add", items, () => {});
   const first = pick.render(60).map(stripAnsi);
-  assert.equal(first.length, PickDialog.MAX_ROWS + 2, "list rows plus two frame edges");
+  assert.equal(first.length, PickDialog.MAX_ROWS + 3, "filter row, list rows, two frame edges");
   assert.match(first.join("\n"), /› \[ \] skill-00/);
-  for (let i = 0; i < 20; i += 1) pick.handleInput("j");
+  for (let i = 0; i < 20; i += 1) pick.handleInput("\x1b[B");
   const later = pick.render(60).map(stripAnsi).join("\n");
   assert.match(later, /› \[ \] skill-20/);
   assert.doesNotMatch(later, /skill-00/);
@@ -89,8 +89,8 @@ test("PickDialog: caps visible rows and scrolls the cursor into view", () => {
 test("PickDialog: enter with nothing marked adds the highlighted skill", () => {
   const results: (string[] | undefined)[] = [];
   const pick = new PickDialog(fakeTheme, "Add", items.slice(0, 5), (v) => results.push(v));
-  pick.handleInput("j");
-  pick.handleInput("j");
+  pick.handleInput("\x1b[B");
+  pick.handleInput("\x1b[B");
   pick.handleInput("\r");
   assert.deepEqual(results, [["skill-02"]]);
 });
@@ -99,10 +99,10 @@ test("PickDialog: space marks and unmarks, enter adds the marked set, esc cancel
   const results: (string[] | undefined)[] = [];
   const pick = new PickDialog(fakeTheme, "Add", items.slice(0, 5), (v) => results.push(v));
   pick.handleInput(" "); // mark 00
-  pick.handleInput("j");
+  pick.handleInput("\x1b[B");
   pick.handleInput(" "); // mark 01
   pick.handleInput(" "); // unmark 01
-  pick.handleInput("j");
+  pick.handleInput("\x1b[B");
   pick.handleInput(" "); // mark 02
   assert.match(pick.render(60).map(stripAnsi).join("\n"), /2 marked/);
   pick.handleInput("\r");
@@ -123,4 +123,47 @@ test("ConfirmDialog: enter confirms, esc cancels, other keys ignored", () => {
   const ignored = make();
   for (const key of ["y", "n", "x", " "]) ignored.handleInput(key);
   assert.deepEqual(results, [true, false]);
+});
+
+test("PickDialog: typing filters the list and shows the match count", () => {
+  const pick = new PickDialog(fakeTheme, "Add", items, () => {});
+  pick.handleInput("0"); // filters to skill-00…09, skill-10, skill-20
+  const filtered = pick.render(60).map(stripAnsi).join("\n");
+  assert.match(filtered, /12\/30/);
+  assert.match(filtered, /› \[ \] skill-00/);
+  assert.doesNotMatch(filtered, /skill-29/);
+  // backspace clears the filter
+  pick.handleInput("\x7f");
+  assert.match(pick.render(60).map(stripAnsi).join("\n"), /type to filter/);
+  assert.match(pick.render(60).map(stripAnsi).join("\n"), /› \[ \] skill-00/);
+});
+
+test("PickDialog: filter is case-insensitive and cursor stays clamped while filtering", () => {
+  const results: (string[] | undefined)[] = [];
+  const pick = new PickDialog(fakeTheme, "Add", items, (v) => results.push(v));
+  for (let i = 0; i < 10; i += 1) pick.handleInput("\x1b[B"); // cursor deep in the list
+  pick.handleInput("S"); // uppercase still matches, cursor clamps back into range
+  pick.handleInput("KILL-29");
+  const rendered = pick.render(60).map(stripAnsi).join("\n");
+  assert.match(rendered, /1\/30/);
+  assert.match(rendered, /› \[ \] skill-29/);
+  pick.handleInput("\r");
+  assert.deepEqual(results, [["skill-29"]]);
+});
+
+test("PickDialog: enter adds marks that the current filter hides", () => {
+  const results: (string[] | undefined)[] = [];
+  const pick = new PickDialog(fakeTheme, "Add", items, (v) => results.push(v));
+  pick.handleInput(" "); // mark skill-00
+  pick.handleInput("1"); // filter away skill-00
+  pick.handleInput("\r");
+  assert.deepEqual(results, [["skill-00"]]);
+});
+
+test("PickDialog: enter with no matches resolves an empty set", () => {
+  const results: (string[] | undefined)[] = [];
+  const pick = new PickDialog(fakeTheme, "Add", items.slice(0, 5), (v) => results.push(v));
+  pick.handleInput("zzz");
+  pick.handleInput("\r");
+  assert.deepEqual(results, [[]]);
 });

@@ -18,7 +18,9 @@ pi install npm:pi-skill-stacks
 | members | `↑`/`↓` move · `space` remove · `→` view · `a` add skills · `←` back |
 | viewer | `↑`/`↓` scroll (mouse wheel in fullscreen) · `←` back |
 
-`a` lists skills not yet in any stack. To move a skill between stacks, `space` it out of one and `a` it into the other.
+`a` opens a picker of skills not yet in any stack. Type to filter it, `space` to mark several, `enter` to add. To move a skill between stacks, `space` it out of one and `a` it into the other.
+
+With no stacks defined, `enter` (or `n`) creates the first one and opens the picker right after.
 
 From the command line: `/stacks on <stack>`, `/stacks off <stack>`, `/stacks list`.
 
@@ -40,6 +42,8 @@ Skills are discovered like pi does: every `SKILL.md` under `~/.agents/skills/` a
 Turning a stack off writes `!skills/<dir>/SKILL.md` patterns into the `skills` array of `~/.pi/agent/settings.json`, pi's own exclusion mechanism. The package only removes patterns it wrote itself; hand-written entries stay. A skill is excluded only when no enabled stack contains it, and skills in no stack are never touched. pi reloads once when the overlay closes, only if `settings.json` changed.
 
 Stack names that don't match a discovered skill are flagged `missing` and not counted.
+
+For other extensions, `loadStacksSummary()` in `src/store.ts` returns stack names, on/off state, and counts (`totalCount`, `activeCount`, `unstackedCount`).
 
 ## Develop
 
