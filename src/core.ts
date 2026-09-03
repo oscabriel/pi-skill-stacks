@@ -36,6 +36,8 @@ export interface StacksSummary {
   offStacks: string[];
   totalCount: number;
   activeCount: number;
+  /** Discovered skills that no stack contains. */
+  unstackedCount: number;
   /** Per-stack status in definition order. */
   stacks: StackStatus[];
 }
@@ -58,6 +60,9 @@ export function missingSkillNames(stacks: StackMap, discovered: DiscoveredSkills
   }
   return missing;
 }
+
+/** Every skill name any stack references, discovered or not. */
+export const stackedSkills = (stacks: StackMap) => new Set(Object.values(stacks).flat());
 
 /**
  * A skill is excluded iff it appears in at least one stack and no enabled
@@ -161,7 +166,7 @@ export function nextDisabledStacks(
   return sortNames(new Set([...unseen, ...visibleDisabled]));
 }
 
-/** Stack and active-skill counts. Only discovered skills are counted. */
+/** Stack, active-skill, and unstacked-skill counts. Only discovered skills are counted. */
 export function summarizeStacks(
   stacks: StackMap,
   disabledStacks: string[],
@@ -169,9 +174,12 @@ export function summarizeStacks(
 ): StacksSummary {
   const stackNames = Object.keys(stacks);
   const excluded = computeExcludedSkills(stacks, disabledStacks);
+  const stacked = stackedSkills(stacks);
   let activeCount = 0;
+  let unstackedCount = 0;
   for (const name of discovered.keys()) {
     if (!excluded.has(name)) activeCount += 1;
+    if (!stacked.has(name)) unstackedCount += 1;
   }
   const disabled = new Set(disabledStacks);
   return {
@@ -179,6 +187,7 @@ export function summarizeStacks(
     offStacks: disabledStacks.filter((name) => stackNames.includes(name)),
     totalCount: discovered.size,
     activeCount,
+    unstackedCount,
     stacks: Object.entries(stacks).map(([name, skills]) => ({
       name,
       size: skills.filter((skill) => discovered.has(skill)).length,

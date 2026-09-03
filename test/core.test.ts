@@ -131,8 +131,9 @@ test("summarizeStacks: counts stacks, active skills, and names disabled stacks",
   assert.equal(summary.stackCount, 2);
   assert.deepEqual(summary.offStacks, ["off"]);
   assert.equal(summary.totalCount, 5);
-  // a, b, unlisted stay active; c, d are excluded.
+  // a, b, unlisted stay active; c, d are excluded. Only "unlisted" is in no stack.
   assert.equal(summary.activeCount, 3);
+  assert.equal(summary.unstackedCount, 1);
   assert.deepEqual(summary.stacks, [
     { name: "on", size: 2, enabled: true },
     { name: "off", size: 2, enabled: false },
@@ -148,4 +149,6 @@ test("summarizeStacks: excluded count only covers discovered skills", () => {
   const summary = summarizeStacks({ off: ["ghost", "real"] }, ["off"], skillsOnDisk("real"));
   assert.equal(summary.totalCount, 1);
   assert.equal(summary.activeCount, 0);
+  // ghost is stacked but missing from disk, so it doesn't count as unstacked.
+  assert.equal(summary.unstackedCount, 0);
 });

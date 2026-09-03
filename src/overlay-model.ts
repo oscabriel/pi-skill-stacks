@@ -8,7 +8,13 @@
 // to them would be shadowed by the project config on the next merge.
 
 import { renderMarkdown, type MarkdownStyler } from "./markdown.ts";
-import { computeExcludedSkills, sortNames, type DiscoveredSkills, type StackMap } from "./core.ts";
+import {
+  computeExcludedSkills,
+  sortNames,
+  stackedSkills,
+  type DiscoveredSkills,
+  type StackMap,
+} from "./core.ts";
 
 export type OverlayFocus = "stacks" | "members" | "viewer";
 
@@ -130,7 +136,7 @@ export class StacksOverlayModel {
 
   /** Discovered skills that no stack (enabled or not) contains, sorted. */
   unstackedSkills() {
-    const stacked = new Set(Object.values(this.stackMap).flat());
+    const stacked = stackedSkills(this.stackMap);
     return sortNames([...this.discovered.keys()].filter((skill) => !stacked.has(skill)));
   }
 
